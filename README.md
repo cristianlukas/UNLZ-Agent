@@ -32,9 +32,9 @@ This application is engineered ensuring modularity, security, and scalability:
 
 - Node.js 18+ (for Web GUI)
 - Python 3.10+
-- n8n (Self-hosted)
-- Ollama (installed locally)
-- Supabase Account (Free Tier)
+- n8n (Self-hosted or Cloud)
+- **LLM**: Ollama (Local) OR OpenAI (Cloud)
+- **Vector DB**: ChromaDB (Local default) OR Supabase (Cloud)
 
 ### 2. Installation
 

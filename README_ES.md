@@ -32,9 +32,9 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
 ### 1. Requisitos Previos
 
 - Python 3.10+
-- n8n (Auto-hospedado)
-- Ollama (instalado localmente)
-- Cuenta de Supabase (Plan Gratuito)
+- n8n (Auto-hospedado o Cloud)
+- **LLM**: Ollama (Local) O OpenAI (Cloud)
+- **Base de Datos Vectorial**: ChromaDB (Local por defecto) O Supabase (Cloud)
 
 ### 2. Instalación
 
