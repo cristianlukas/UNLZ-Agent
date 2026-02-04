@@ -32,7 +32,16 @@ export async function GET() {
   const checks = {
     llm: { status: 'unknown', details: '' },
     vectordb: { status: 'unknown', details: '' },
-    n8n: { status: 'unknown', details: '' }
+    n8n: { status: 'unknown', details: '' },
+    mcp: { status: 'unknown', details: '' }
+  };
+
+  // 0. MCP Server Check (Port 8000)
+  // We assume localhost:8000/sse is the endpoint, or just check root
+  const mcpUp = await checkUrl('http://localhost:8000/sse', 'GET'); // or HEAD
+  checks.mcp = {
+      status: mcpUp ? 'ok' : 'error',
+      details: mcpUp ? 'MCP Server running on port 8000' : 'MCP Server stopped or port blocked'
   };
 
   // 1. LLM Check

@@ -38,21 +38,13 @@ This application is engineered ensuring modularity, security, and scalability:
 
 ### 2. Installation
 
-```bash
-pip install -r requirements.txt
-```
+### 3. Running the Application
 
-### 3. Running the Backend (MCP Server)
-
-```bash
-python mcp_server.py
-```
-
-### 4. Running the Frontend (Web GUI)
+This is a full-stack application. You only need to run the frontend, and it will automatically manage the backend (MCP Server) for you.
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to use the UNLZ Agent.
+Open [http://localhost:3000](http://localhost:3000) in your browser. The "UNLZ Agent" backend will start automatically.

@@ -38,21 +38,13 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
 
 ### 2. Instalación
 
-```bash
-pip install -r requirements.txt
-```
+### 3. Ejecutar la Aplicación
 
-### 3. Ejecutar el Backend (Servidor MCP)
-
-```bash
-python mcp_server.py
-```
-
-### 4. Ejecutar el Frontend (Interfaz Web)
+Esta es una aplicación "Full Stack". Solo necesitas iniciar el frontend, y este gestionará automáticamente el backend (Servidor MCP).
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Abre [http://localhost:3000](http://localhost:3000) para usar el UNLZ Agent.
+Abre [http://localhost:3000](http://localhost:3000) en tu navegador. El backend "UNLZ Agent" iniciará automáticamente.

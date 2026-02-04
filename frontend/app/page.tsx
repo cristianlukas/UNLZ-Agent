@@ -79,20 +79,6 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  // Poll for system stats
-  useEffect(() => {
-    const fetchHealth = async () => {
-      try {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        setStats(data);
-      } catch (e) {
-        setStats({ status: 'offline', components: {} });
-      }
-    };
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 10000); // Poll every 10s
-  // Poll for system stats AND check/start MCP Server
   useEffect(() => {
     // 1. Fetch Config to get Language
     fetch('/api/settings').then(res => res.json()).then(data => {

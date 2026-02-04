@@ -167,7 +167,23 @@ export default function Settings() {
              </div>
           )}
 
-          <div className="pt-2 flex justify-end">
+          <div className="pt-2 flex justify-between items-center">
+            {/* Server Control */}
+            <div className="flex gap-2">
+                 <button 
+                  onClick={() => fetch('/api/system/control', { method: 'POST', body: JSON.stringify({ action: 'start' }) })}
+                  className="px-4 py-2 bg-green-900/30 text-green-400 border border-green-900/50 rounded-lg text-xs hover:bg-green-900/50 transition-colors"
+                >
+                  Start Server
+                </button>
+                <button 
+                  onClick={() => fetch('/api/system/control', { method: 'POST', body: JSON.stringify({ action: 'stop' }) })}
+                  className="px-4 py-2 bg-red-900/30 text-red-400 border border-red-900/50 rounded-lg text-xs hover:bg-red-900/50 transition-colors"
+                >
+                  Stop Server
+                </button>
+            </div>
+
             <button 
               onClick={handleSave}
               disabled={saving}
