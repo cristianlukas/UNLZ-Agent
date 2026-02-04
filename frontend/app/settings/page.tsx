@@ -142,7 +142,6 @@ export default function Settings() {
 
           <hr className="border-[#27272a]" />
 
-          
           {/* MCP Configuration */}
           <div>
             <label className="block text-sm font-medium text-gray-400 mb-2">{t.mcpPort}</label>
@@ -157,6 +156,8 @@ export default function Settings() {
 
           <hr className="border-[#27272a]" />
 
+          
+          {/* MCP Configuration */}
           {/* Connection Details */}
           <div>
             <label className="block text-sm font-medium text-gray-400 mb-2">{t.n8nUrl}</label>
