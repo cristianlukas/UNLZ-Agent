@@ -9,6 +9,7 @@ export default function Settings() {
     VECTOR_DB_PROVIDER: 'chroma',
     LLM_PROVIDER: 'ollama',
     AGENT_LANGUAGE: 'en',
+    OLLAMA_BASE_URL: '',
     SUPABASE_URL: '',
     SUPABASE_KEY: '',
     OPENAI_API_KEY: ''
@@ -95,6 +96,19 @@ export default function Settings() {
               </div>
             </div>
           </div>
+          
+          {config.LLM_PROVIDER === 'ollama' && (
+             <div className="mt-4 animate-fadeIn">
+                 <label className="block text-sm font-medium text-gray-400 mb-2">Ollama Base URL</label>
+                 <input 
+                  type="text" 
+                  value={config.OLLAMA_BASE_URL}
+                  onChange={(e) => setConfig({ ...config, OLLAMA_BASE_URL: e.target.value })}
+                  placeholder="http://localhost:11434"
+                  className="w-full bg-[#09090b] border border-[#27272a] rounded-lg p-3 text-sm focus:border-gray-500 outline-none transition-colors placeholder-gray-600"
+                />
+             </div>
+          )}
 
           <hr className="border-[#27272a]" />
 

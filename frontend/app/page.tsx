@@ -38,20 +38,20 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  // Poll for system stats (Optional / Visual)
+  // Poll for system stats
   useEffect(() => {
-    const fetchStats = async () => {
+    const fetchHealth = async () => {
       try {
-        // In a real scenario, this would hit the MCP server directly or via a proxy
-        // For now, we simulate connectivity check
-        setStats({ status: 'connected' }); 
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        setStats(data);
       } catch (e) {
-        console.error(e);
+        setStats({ status: 'offline', components: {} });
       }
     };
-    fetchStats();
-    // const interval = setInterval(fetchStats, 5000);
-    // return () => clearInterval(interval);
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 10000); // Poll every 10s
+    return () => clearInterval(interval);
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -118,24 +118,25 @@ export default function Home() {
 
         <div className="flex-1 overflow-y-auto px-3 py-2">
             <div className="text-xs font-semibold text-gray-500 mb-3 px-2">History</div>
-            {/* Dummy History Items */}
-            <div className="flex flex-col gap-2">
-                <button className="text-sm text-gray-300 hover:bg-[#27272a] px-3 py-2 rounded-lg text-left truncate flex items-center gap-2">
-                    <MessageSquare size={14} className="text-gray-500"/>
-                    <span>Researching AI Agents</span>
-                </button>
-                 <button className="text-sm text-gray-300 hover:bg-[#27272a] px-3 py-2 rounded-lg text-left truncate flex items-center gap-2">
-                    <MessageSquare size={14} className="text-gray-500"/>
-                    <span>University Regulations</span>
-                </button>
-            </div>
+            <div className="text-xs text-gray-600 px-2 italic">No recent chats</div>
         </div>
 
         <div className="p-3 border-t border-[#27272a]">
             {stats && (
-                 <div className="flex items-center gap-2 px-3 py-2 text-xs text-green-500 mb-2">
-                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                    System Online
+                 <div className="flex flex-col gap-1 px-3 py-2 text-xs mb-2 bg-[#18181b] rounded border border-[#27272a]">
+                    <div className="flex items-center gap-2 font-mono font-bold text-gray-400 border-b border-[#27272a] pb-1 mb-1">
+                        <span className={`w-2 h-2 rounded-full ${stats.status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
+                        STATUS: {stats.status.toUpperCase()}
+                    </div>
+                    {stats.components && Object.entries(stats.components).map(([key, val]: any) => (
+                        <div key={key} className="flex justify-between items-center">
+                            <span className="opacity-70 uppercase text-[10px]">{key}</span>
+                            <span className={`
+                                w-1.5 h-1.5 rounded-full 
+                                ${val.status === 'ok' ? 'bg-green-500' : val.status === 'warning' ? 'bg-yellow-500' : 'bg-red-500'}
+                            `} title={val.details}></span>
+                        </div>
+                    ))}
                 </div>
             )}
             <Link href="/settings" className="flex items-center gap-3 w-full px-3 py-3 rounded-lg hover:bg-[#27272a] transition-colors text-sm text-gray-200">
