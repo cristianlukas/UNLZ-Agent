@@ -38,6 +38,50 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
 
 ### 2. Instalación
 
+### 2. Instalación
+
+1.  **Clonar el repositorio**:
+
+    ```bash
+    git clone https://github.com/tu-usuario/UNLZ-Agent.git
+    cd UNLZ-Agent
+    ```
+
+2.  **Configurar Entorno Python**:
+
+    ```bash
+    # Crear entorno virtual
+    python -m venv venv
+
+    # Activar entorno virtual
+    # Windows:
+    .\venv\Scripts\activate
+    # Mac/Linux:
+    source venv/bin/activate
+
+    # Instalar dependencias
+    pip install -r requirements.txt
+    ```
+
+3.  **Configurar Frontend**:
+
+    ```bash
+    cd frontend
+    npm install
+    # o
+    yarn install
+    ```
+
+4.  **Configurar Entorno**:
+    Crea un archivo `.env` en el directorio raíz:
+    ```env
+    # Ejemplo de contenido .env
+    VECTOR_DB_PROVIDER=chroma
+    LLM_PROVIDER=ollama
+    OLLAMA_BASE_URL=http://localhost:11434
+    MCP_PORT=8000
+    ```
+
 ### 3. Ejecutar la Aplicación
 
 Esta es una aplicación "Full Stack". Solo necesitas iniciar el frontend, y este gestionará automáticamente el backend (Servidor MCP).

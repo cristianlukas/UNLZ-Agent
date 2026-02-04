@@ -38,6 +38,50 @@ This application is engineered ensuring modularity, security, and scalability:
 
 ### 2. Installation
 
+### 2. Installation
+
+1.  **Clone the repository**:
+
+    ```bash
+    git clone https://github.com/tu-usuario/UNLZ-Agent.git
+    cd UNLZ-Agent
+    ```
+
+2.  **Set up Python Environment**:
+
+    ```bash
+    # Create virtual environment
+    python -m venv venv
+
+    # Activate virtual environment
+    # Windows:
+    .\venv\Scripts\activate
+    # Mac/Linux:
+    source venv/bin/activate
+
+    # Install dependencies
+    pip install -r requirements.txt
+    ```
+
+3.  **Set up Frontend**:
+
+    ```bash
+    cd frontend
+    npm install
+    # or
+    yarn install
+    ```
+
+4.  **Configure Environment**:
+    Create a `.env` file in the root directory (use established example if available):
+    ```env
+    # Example .env content
+    VECTOR_DB_PROVIDER=chroma
+    LLM_PROVIDER=ollama
+    OLLAMA_BASE_URL=http://localhost:11434
+    MCP_PORT=8000
+    ```
+
 ### 3. Running the Application
 
 This is a full-stack application. You only need to run the frontend, and it will automatically manage the backend (MCP Server) for you.
