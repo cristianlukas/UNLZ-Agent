@@ -1,4 +1,4 @@
-# Guía de Configuración: Integración del Agente UNLZ
+# Guía de Configuración: UNLZ Agent
 
 [🇬🇧 English](setup_guide.md) | [🇪🇸 Español](setup_guide_ES.md)
 
@@ -20,11 +20,10 @@ Asegúrate de que la estructura de carpetas se vea así:
 
 ```
 Documents/GitHub/
-├── UNLZ-AI-STUDIO/
-│   └── system/
-│       └── data/  <-- El servidor MCP busca aquí
-└── UNLZ-Agent/    <-- Este repositorio
-    └── mcp_server.py
+├── UNLZ-Agent/    <-- Este repositorio
+│   ├── data/      <-- Base de Conocimiento Local (Pon tus PDFs aquí)
+│   ├── mcp_server.py
+│   └── ...
 ```
 
 ## 2. Ejecutar el Servidor MCP

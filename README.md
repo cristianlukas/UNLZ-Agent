@@ -1,14 +1,14 @@
-# Autonomous University Researcher Agent
+# UNLZ Agent: Autonomous Multi-Modal Assistant
 
 [🇬🇧 English](README.md) | [🇪🇸 Español](README_ES.md)
 
-This project transforms the **UNLZ AI Studio** into an autonomous research agent. It orchestrates a local agentic workflow using **n8n**, integrating **Model Context Protocol (MCP)** for resource access and a flexible **RAG** pipeline for knowledge retrieval.
+This project is a **Multi-Modal Autonomous Agent** designed for flexible research and assistance. It orchestrates a local agentic workflow using **n8n**, integrating **Model Context Protocol (MCP)** for resource access and a flexible **RAG** pipeline for knowledge retrieval.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    A[UNLZ AI Studio<br/>Local PC] -->|MCP Protocol| B(MCP Server<br/>Python Script)
+    A[Local Knowledge Base<br/>/data folder] -->|MCP Protocol| B(MCP Server<br/>Python Script)
     B -->|Exposes Tools| C[n8n Workflow<br/>Local Agent Orchestrator]
     C -->|Stores/Retrieves| D[Supabase<br/>Vector DB & Memory]
     C -->|Search| E[Web Search Tool]

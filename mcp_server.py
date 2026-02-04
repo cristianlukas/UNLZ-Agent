@@ -66,12 +66,35 @@ def trigger_rag_ingestion() -> str:
 def search_local_knowledge(query: str) -> list[dict]:
     """
     Search the local knowledge base (RAG) for relevant information.
+    Use this for questions about university regulations, documents, or internal data.
     Returns a list of matching document chunks.
     """
     return search_documents(query)
 
+from duckduckgo_search import DDGS
+from datetime import datetime
+
 @mcp.tool()
-def list_studio_data_files() -> list[str]:
+def web_search(query: str, max_results: int = 3) -> list[dict]:
+    """
+    Search the internet for current events, news, or general information.
+    Use this for questions about 'current prices', 'latest news', or topics not in local docs.
+    """
+    try:
+        results = DDGS().text(query, max_results=max_results)
+        return results if results else [{"error": "No results found."}]
+    except Exception as e:
+        return [{"error": f"Search failed: {str(e)}"}]
+
+@mcp.tool()
+def get_current_time() -> str:
+    """
+    Get the current local date and time.
+    """
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+@mcp.tool()
+def list_knowledge_base_files() -> list[str]:
     """
     List files available in the UNLZ AI Studio system/data directory.
     These files might contain user configurations, logs, or knowledge base items.

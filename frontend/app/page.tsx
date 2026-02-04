@@ -137,7 +137,7 @@ export default function Home() {
         {/* Chat Header */}
         <div className="h-14 border-b border-gray-700 flex items-center px-6 bg-gray-800/50 backdrop-blur justify-between">
           <div className="flex items-center gap-3">
-             <span className="font-semibold text-lg">Research Agent Chat</span>
+             <span className="font-semibold text-lg">UNLZ Agent</span>
              <Link href="/settings" className="text-xs text-gray-400 hover:text-white flex items-center gap-1 border border-gray-600 rounded px-2 py-1 transition-colors">
                ⚙️ Settings
              </Link>

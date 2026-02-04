@@ -1,8 +1,8 @@
-# Setup Guide: UNLZ Agent Integration
+# Setup Guide: UNLZ Agent
 
 [🇬🇧 English](setup_guide.md) | [🇪🇸 Español](setup_guide_ES.md)
 
-This guide explains how to connect your **Ollama**, **Local n8n**, and **Supabase** using this MCP server.
+This guide explains how to connect your **Ollama**, **Local n8n**, and **Supabase/Chroma** using this MCP server.
 
 ## 1. Environment Setup
 
@@ -18,14 +18,11 @@ pip install -r requirements.txt
 
 Ensure your folder structure looks like this:
 
-```
 Documents/GitHub/
-├── UNLZ-AI-STUDIO/
-│   └── system/
-│       └── data/  <-- The MCP server looks here
-└── UNLZ-Agent/    <-- This repository
-    └── mcp_server.py
-```
+├── UNLZ-Agent/ <-- This repository
+│ ├── data/ <-- Local Knowledge Base (PDFs go here)
+│ ├── mcp_server.py
+│ └── ...
 
 ## 2. Running the MCP Server
 

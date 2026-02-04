@@ -12,7 +12,8 @@ class Config:
     # Paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     RAG_STORAGE_PATH = os.path.join(BASE_DIR, "rag_storage")
-    DATA_DIR = os.path.join(BASE_DIR, "..", "UNLZ-AI-STUDIO", "system", "data")
+    # Default to a local 'data' folder if the external studio path is not used
+    DATA_DIR = os.path.join(BASE_DIR, "data") 
 
     # Supabase (Optional)
     SUPABASE_URL = os.getenv("SUPABASE_URL", "")
