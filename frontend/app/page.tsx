@@ -2,23 +2,32 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import { 
+  Send, 
+  Bot, 
+  User, 
+  Settings, 
+  Menu, 
+  Plus, 
+  MessageSquare,
+  Search,
+  Cpu
+} from 'lucide-react';
 
 type Message = {
   role: 'user' | 'assistant';
   content: string;
 };
 
-type Stats = {
-  cpu: { usagePercent: number; model: string };
-  memory: { usagePercent: number; usedGb: string; totalGb: string };
-  gpu: { usagePercent: number; model: string };
-};
-
 export default function Home() {
+  const [messages, setMessages] = useState<Message[]>([
+    { role: 'assistant', content: 'Hello! I am the **UNLZ Agent**. I can help you research university documents, search the web, or answer general questions.\n\nHow can I help you today?' }
+  ]);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [stats, setStats] = useState<Stats | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [stats, setStats] = useState<any>(null);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -29,175 +38,223 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  // Fetch stats every 2 seconds
+  // Poll for system stats (Optional / Visual)
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch('/api/stats');
-        if (res.ok) {
-          const data = await res.json();
-          setStats(data);
-        }
+        // In a real scenario, this would hit the MCP server directly or via a proxy
+        // For now, we simulate connectivity check
+        setStats({ status: 'connected' }); 
       } catch (e) {
-        console.error('Stats fetch error', e);
+        console.error(e);
       }
     };
     fetchStats();
-    const interval = setInterval(fetchStats, 2000);
-    return () => clearInterval(interval);
+    // const interval = setInterval(fetchStats, 5000);
+    // return () => clearInterval(interval);
   }, []);
 
-  const sendMessage = async () => {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!input.trim()) return;
 
-    const userMsg: Message = { role: 'user', content: input };
-    setMessages(prev => [...prev, userMsg]);
+    const userMessage = { role: 'user' as const, content: input };
+    setMessages(prev => [...prev, userMessage]);
     setInput('');
-    setLoading(true);
+    setIsLoading(true);
 
     try {
-      const res = await fetch('/api/chat', {
+      const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMsg.content }),
+        body: JSON.stringify({ message: userMessage.content }),
       });
 
-      if (!res.ok) throw new Error('Network response was not ok');
+      const data = await response.json();
+      
+      // Handle the response structure from n8n
+      let botText = '';
+      if (Array.isArray(data)) {
+        botText = data[0]?.output || JSON.stringify(data);
+      } else {
+        botText = data.output || data.message || JSON.stringify(data);
+      }
 
-      const data = await res.json();
-      const aiMsg: Message = { role: 'assistant', content: data.response || 'No response from agent.' };
-      setMessages(prev => [...prev, aiMsg]);
+      setMessages(prev => [...prev, { role: 'assistant', content: botText }]);
     } catch (error) {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Error connecting to Agent. Is n8n running?' }]);
+      console.error('Error:', error);
+      setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ Error connecting to the agent. Please check if n8n is running.' }]);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
+  // Simple Markdown Renderer
+  const renderMarkdown = (text: string) => {
+      // Basic replacement for demo purposes. 
+      // In production, use 'react-markdown'
+      let html = text
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\n/g, '<br/>');
+      
+      return <div className="prose text-sm md:text-base leading-relaxed" dangerouslySetInnerHTML={{ __html: html }} />;
+  };
+
   return (
-    <div className="flex h-screen bg-gray-900 text-gray-100 font-sans">
-      {/* Sidebar: System Stats */}
-      <div className="w-64 bg-gray-800 p-4 border-r border-gray-700 flex flex-col gap-6">
-        <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
-          UNLZ AI Studio
-        </h1>
-        
-        {/* CPU Card */}
-        <div className="bg-gray-700/50 p-3 rounded-lg border border-gray-600">
-          <div className="text-xs text-gray-400 uppercase mb-1">CPU</div>
-          <div className="text-sm font-semibold truncate" title={stats?.cpu.model}>{stats?.cpu.model || 'Loading...'}</div>
-          <div className="mt-2 flex items-center gap-2">
-             <div className="h-2 flex-grow bg-gray-600 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-blue-500 transition-all duration-500" 
-                  style={{ width: `${stats?.cpu.usagePercent || 0}%` }}
-                />
-             </div>
-             <span className="text-xs">{stats?.cpu.usagePercent || 0}%</span>
-          </div>
+    <div className="flex h-screen bg-[#09090b] text-gray-100 font-sans overflow-hidden">
+      
+      {/* Sidebar */}
+      <div className={`${sidebarOpen ? 'w-[260px]' : 'w-0'} bg-black flex-shrink-0 transition-all duration-300 ease-in-out border-r border-[#27272a] flex flex-col overflow-hidden`}>
+        <div className="p-3">
+          <button 
+            onClick={() => setMessages([{ role: 'assistant', content: 'Hello! I am the **UNLZ Agent**. How can I help you today?' }])}
+            className="flex items-center gap-3 w-full px-3 py-3 rounded-lg border border-[#27272a] hover:bg-[#27272a] transition-colors text-sm text-left text-white"
+          >
+            <Plus size={16} />
+            <span>New Chat</span>
+          </button>
         </div>
 
-        {/* RAM Card */}
-        <div className="bg-gray-700/50 p-3 rounded-lg border border-gray-600">
-          <div className="text-xs text-gray-400 uppercase mb-1">RAM</div>
-          <div className="text-sm font-semibold">{stats?.memory.usedGb || 0} / {stats?.memory.totalGb || 0} GB</div>
-           <div className="mt-2 flex items-center gap-2">
-             <div className="h-2 flex-grow bg-gray-600 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-purple-500 transition-all duration-500" 
-                  style={{ width: `${stats?.memory.usagePercent || 0}%` }}
-                />
-             </div>
-             <span className="text-xs">{stats?.memory.usagePercent || 0}%</span>
-          </div>
+        <div className="flex-1 overflow-y-auto px-3 py-2">
+            <div className="text-xs font-semibold text-gray-500 mb-3 px-2">History</div>
+            {/* Dummy History Items */}
+            <div className="flex flex-col gap-2">
+                <button className="text-sm text-gray-300 hover:bg-[#27272a] px-3 py-2 rounded-lg text-left truncate flex items-center gap-2">
+                    <MessageSquare size={14} className="text-gray-500"/>
+                    <span>Researching AI Agents</span>
+                </button>
+                 <button className="text-sm text-gray-300 hover:bg-[#27272a] px-3 py-2 rounded-lg text-left truncate flex items-center gap-2">
+                    <MessageSquare size={14} className="text-gray-500"/>
+                    <span>University Regulations</span>
+                </button>
+            </div>
         </div>
 
-        {/* GPU Card */}
-        <div className="bg-gray-700/50 p-3 rounded-lg border border-gray-600">
-           <div className="text-xs text-gray-400 uppercase mb-1">GPU (Simulated)</div>
-           <div className="text-sm font-semibold truncate">{stats?.gpu.model || 'Loading...'}</div>
-           <div className="mt-2 flex items-center gap-2">
-             <div className="h-2 flex-grow bg-gray-600 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-green-500 transition-all duration-500" 
-                  style={{ width: `${stats?.gpu.usagePercent || 0}%` }}
-                />
-             </div>
-             <span className="text-xs">{stats?.gpu.usagePercent || 0}%</span>
-          </div>
-        </div>
-
-        <div className="mt-auto text-xs text-gray-500">
-          Hardware Monitor Active via Node.js
+        <div className="p-3 border-t border-[#27272a]">
+            {stats && (
+                 <div className="flex items-center gap-2 px-3 py-2 text-xs text-green-500 mb-2">
+                    <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                    System Online
+                </div>
+            )}
+            <Link href="/settings" className="flex items-center gap-3 w-full px-3 py-3 rounded-lg hover:bg-[#27272a] transition-colors text-sm text-gray-200">
+                <Settings size={18} />
+                <span>Settings</span>
+            </Link>
+             <div className="flex items-center gap-3 px-3 py-3 mt-1">
+                <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-xs font-bold">U</div>
+                <div className="text-sm font-medium">User</div>
+            </div>
         </div>
       </div>
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
-        {/* Chat Header */}
-        <div className="h-14 border-b border-gray-700 flex items-center px-6 bg-gray-800/50 backdrop-blur justify-between">
-          <div className="flex items-center gap-3">
-             <span className="font-semibold text-lg">UNLZ Agent</span>
-             <Link href="/settings" className="text-xs text-gray-400 hover:text-white flex items-center gap-1 border border-gray-600 rounded px-2 py-1 transition-colors">
-               ⚙️ Settings
-             </Link>
-          </div>
-          <span className="text-xs px-2 py-1 bg-green-900/50 text-green-400 rounded border border-green-800">
-            {stats ? 'System Online' : 'Connecting...'}
-          </span>
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col h-full relative">
+        
+        {/* Header (Mobile / Desktop Toggle) */}
+        <div className="flex items-center justify-between p-4 md:hidden border-b border-[#27272a]">
+            <button onClick={() => setSidebarOpen(!sidebarOpen)} className="text-gray-400">
+                <Menu />
+            </button>
+            <span className="font-semibold">UNLZ Agent</span>
+             <Link href="/settings"><Settings size={20} className="text-gray-400"/></Link>
         </div>
-
-        {/* Messages List */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {messages.length === 0 && (
-             <div className="text-center text-gray-500 mt-20">
-                <p className="text-xl">Welcome to UNLZ Research Agent</p>
-                <p className="text-sm mt-2">Ask me anything about your university documents.</p>
-             </div>
-          )}
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div 
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                  msg.role === 'user' 
-                    ? 'bg-blue-600 text-white rounded-br-sm' 
-                    : 'bg-gray-700 text-gray-100 rounded-bl-sm border border-gray-600'
-                }`}
-              >
-                {msg.content}
-              </div>
+        
+        {!sidebarOpen && (
+            <div className="hidden md:flex absolute top-4 left-4 z-10">
+                 <button onClick={() => setSidebarOpen(true)} className="text-gray-400 hover:text-white bg-black/50 p-2 rounded-md">
+                    <Menu size={24} />
+                 </button>
             </div>
-          ))}
-          {loading && (
-             <div className="flex justify-start">
-               <div className="bg-gray-700 rounded-2xl px-4 py-3 border border-gray-600">
-                 <span className="animate-pulse">Thinking...</span>
+        )}
+
+        {/* Chat Area */}
+        <div className="flex-1 overflow-y-auto p-4 md:p-8 scroll-smooth">
+          <div className="max-w-3xl mx-auto space-y-6">
+            {messages.map((msg, idx) => (
+              <div key={idx} className={`flex gap-4 ${msg.role === 'assistant' ? 'bg-transparent' : 'justify-end'}`}>
+                
+                {msg.role === 'assistant' && (
+                  <div className="w-8 h-8 rounded-full bg-emerald-600 flex-shrink-0 flex items-center justify-center mt-1">
+                    <Bot size={18} className="text-white" />
+                  </div>
+                )}
+
+                <div className={`
+                    max-w-[85%] rounded-2xl px-5 py-3 text-sm md:text-base shadow-sm
+                    ${msg.role === 'user' 
+                        ? 'bg-[#27272a] text-white rounded-tr-sm' 
+                        : 'bg-transparent text-gray-100 pl-0'}
+                `}>
+                    {msg.role === 'user' ? (
+                        <div>{msg.content}</div>
+                    ) : (
+                        renderMarkdown(msg.content)
+                    )}
+                </div>
+
+                {msg.role === 'user' && (
+                   <div className="w-8 h-8 rounded-full bg-[#3f3f46] flex-shrink-0 flex items-center justify-center mt-1">
+                     <User size={18} className="text-white" />
+                   </div>
+                )}
+
+              </div>
+            ))}
+            {isLoading && (
+               <div className="flex gap-4 animate-pulse">
+                  <div className="w-8 h-8 rounded-full bg-emerald-600 flex-shrink-0 flex items-center justify-center">
+                    <Bot size={18} className="text-white" />
+                  </div>
+                  <div className="flex gap-1 items-center h-8">
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce delay-100"></div>
+                      <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce delay-200"></div>
+                  </div>
                </div>
-             </div>
-          )}
-          <div ref={messagesEndRef} />
+            )}
+            <div ref={messagesEndRef} />
+          </div>
         </div>
 
         {/* Input Area */}
-        <div className="p-4 border-t border-gray-700 bg-gray-800">
-          <div className="max-w-4xl mx-auto flex gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Ask the researcher..."
-              className="flex-1 bg-gray-900 border border-gray-600 rounded-lg px-4 py-3 focus:outline-none focus:border-blue-500 transition-colors"
-            />
-            <button 
-              onClick={sendMessage}
-              disabled={loading}
-              className="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded-lg font-medium transition-colors disabled:opacity-50"
-            >
-              Send
-            </button>
+        <div className="p-4 md:p-6 bg-[#09090b]">
+          <div className="max-w-3xl mx-auto">
+            <form onSubmit={handleSubmit} className="relative flex items-end gap-2 bg-[#18181b] border border-[#27272a] rounded-xl px-4 py-3 shadow-lg focus-within:ring-1 focus-within:ring-gray-500 transition-all">
+                <button type="button" className="text-gray-400 hover:text-white p-1 pb-2">
+                    <Plus size={20} />
+                </button>
+                <textarea 
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSubmit(e);
+                        }
+                    }}
+                    placeholder="Ask anything..."
+                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none resize-none max-h-32 py-1 scrollbar-hide"
+                    rows={1}
+                />
+                <button 
+                  type="submit" 
+                  disabled={isLoading || !input.trim()}
+                  className={`
+                    p-2 rounded-lg transition-all duration-200 mb-0.5
+                    ${input.trim() ? 'bg-white text-black hover:bg-gray-200' : 'bg-[#27272a] text-gray-500 cursor-not-allowed'}
+                  `}
+                >
+                  <Send size={16} />
+                </button>
+            </form>
+            <div className="text-center text-xs text-gray-500 mt-2">
+                UNLZ Agent can make mistakes. Check important information.
+            </div>
           </div>
         </div>
+
       </div>
     </div>
   );
