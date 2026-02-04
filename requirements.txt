@@ -5,8 +5,11 @@ streamlit
 langchain
 langchain-community
 langchain-ollama
+langchain-chroma
+chromadb
 supabase
 pypdf
 tiktoken
+python-dotenv
 # Guardrails
 pydantic

@@ -47,12 +47,13 @@ def check_query_safety(query: str) -> dict:
     return validate_input(query)
 
 from rag_pipeline.ingest import ingest_documents
+from rag_pipeline.retriever import search_documents
 
 @mcp.tool()
 def trigger_rag_ingestion() -> str:
     """
     Trigger the RAG ingestion process.
-    Reads PDFs from system/data, chunks them, and uploads to Supabase.
+    Reads PDFs from system/data, chunks them, and uploads to Vectors configuration (Local/Cloud).
     Returns a status message.
     """
     try:
@@ -60,6 +61,14 @@ def trigger_rag_ingestion() -> str:
         return "RAG Ingestion completed successfully."
     except Exception as e:
         return f"Error during RAG ingestion: {str(e)}"
+
+@mcp.tool()
+def search_local_knowledge(query: str) -> list[dict]:
+    """
+    Search the local knowledge base (RAG) for relevant information.
+    Returns a list of matching document chunks.
+    """
+    return search_documents(query)
 
 @mcp.tool()
 def list_studio_data_files() -> list[str]:

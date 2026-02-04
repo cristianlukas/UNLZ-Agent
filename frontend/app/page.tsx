@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 
 type Message = {
   role: 'user' | 'assistant';
@@ -134,10 +135,15 @@ export default function Home() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Chat Header */}
-        <div className="h-14 border-b border-gray-700 flex items-center px-6 bg-gray-800/50 backdrop-blur">
-          <span className="font-semibold text-lg">Research Agent Chat</span>
-          <span className="ml-auto text-xs px-2 py-1 bg-green-900/50 text-green-400 rounded border border-green-800">
-            Ollama Connected
+        <div className="h-14 border-b border-gray-700 flex items-center px-6 bg-gray-800/50 backdrop-blur justify-between">
+          <div className="flex items-center gap-3">
+             <span className="font-semibold text-lg">Research Agent Chat</span>
+             <Link href="/settings" className="text-xs text-gray-400 hover:text-white flex items-center gap-1 border border-gray-600 rounded px-2 py-1 transition-colors">
+               ⚙️ Settings
+             </Link>
+          </div>
+          <span className="text-xs px-2 py-1 bg-green-900/50 text-green-400 rounded border border-green-800">
+            {stats ? 'System Online' : 'Connecting...'}
           </span>
         </div>
 

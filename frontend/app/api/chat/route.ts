@@ -1,15 +1,18 @@
 import { NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
+
+const ENV_PATH = path.join(process.cwd(), '..', '.env');
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { message } = body;
 
-    // Call n8n Webhook
-    // Note: n8n local webhook URL. If n8n runs in Docker, use http://host.docker.internal:5678
-    // If n8n runs natively, use http://localhost:5678
-    // Using localhost here assuming the user runs "npm run dev" on the host machine.
-    const N8N_WEBHOOK_URL = 'http://localhost:5678/webhook/chat';
+    // Load dynamic config
+    const envConfig = dotenv.parse(fs.readFileSync(ENV_PATH));
+    const N8N_WEBHOOK_URL = envConfig.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/chat';
 
     const response = await fetch(N8N_WEBHOOK_URL, {
       method: 'POST',
@@ -25,7 +28,6 @@ export async function POST(req: Request) {
     }
 
     const data = await response.json();
-    // Assuming n8n "Respond to Webhook" node returns { "response": "..." }
     return NextResponse.json(data);
 
   } catch (error) {
