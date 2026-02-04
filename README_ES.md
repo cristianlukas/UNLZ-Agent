@@ -17,6 +17,14 @@ graph TD
     C -->|Inferencia LLM| F[Ollama<br/>Localhost:11434]
 ```
 
+## Características Senior (¡Nuevo!)
+
+Este agente incluye patrones de ingeniería avanzada:
+
+- **Pipeline RAG**: `rag_pipeline/ingest.py` fragmenta (chunks) y genera embeddings de PDFs académicos en Supabase Vector.
+- **Guardrails**: `guardrails/validator.py` asegura la seguridad de las consultas antes de procesarlas (Prevención de Prompt Injection).
+- **Herramientas MCP**: Servidor personalizado que expone lógica Python al agente n8n.
+
 ## Configuración
 
 ### 1. Requisitos Previos

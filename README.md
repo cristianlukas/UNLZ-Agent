@@ -18,6 +18,14 @@ graph TD
     G[Web GUI<br/>Next.js] -->|Chat/Webhook| C
 ```
 
+## Senior Features (New!)
+
+This agent includes advanced engineering patterns:
+
+- **RAG Pipeline**: `rag_pipeline/ingest.py` effectively chunks and embeds academic PDFs into Supabase Vector.
+- **Guardrails**: `guardrails/validator.py` ensures query safety before processing (Preventing Prompt Injection).
+- **MCP Tools**: Custom server exposing Python logic to the n8n agent.
+
 ## Setup
 
 ### 1. Prerequisites
