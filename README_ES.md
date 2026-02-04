@@ -17,13 +17,15 @@ graph TD
     C -->|Inferencia LLM| F[Ollama<br/>Localhost:11434]
 ```
 
-## Características Senior (¡Nuevo!)
+## Capacidades del Sistema
 
-Este agente incluye patrones de ingeniería avanzada:
+Esta aplicación está diseñada priorizando la modularidad, la seguridad y la escalabilidad:
 
-- **Pipeline RAG**: `rag_pipeline/ingest.py` fragmenta (chunks) y genera embeddings de PDFs académicos en Supabase Vector.
-- **Guardrails**: `guardrails/validator.py` asegura la seguridad de las consultas antes de procesarlas (Prevención de Prompt Injection).
-- **Herramientas MCP**: Servidor personalizado que expone lógica Python al agente n8n.
+- **Arquitectura RAG Híbrida**: Pipeline flexible (`rag_pipeline/`) que soporta tanto persistencia local (ChromaDB) como almacenamiento vectorial en la nube (Supabase), configurable dinámicamente.
+- **Guardrails de Seguridad**: Capa de validación integrada (`guardrails/`) para sanitizar consultas y prevenir ataques de inyección de prompt.
+- **Herramientas MCP Extensibles**: Servidor de Protocolo de Contexto de Modelos personalizado que expone utilidades Python al flujo de trabajo del agente.
+- **Configuración Centralizada**: Gestión unificada de configuraciones (`config.py`) implementando patrones de diseño para alternar entre proveedores de inferencia Local (Ollama) y Cloud (OpenAI).
+- **Frontend Moderno**: Interfaz web Next.js reactiva para la interacción con el agente y el monitoreo del sistema.
 
 ## Configuración
 

@@ -2,9 +2,7 @@
 
 [🇬🇧 English](README.md) | [🇪🇸 Español](README_ES.md)
 
-## Overview
-
-This project transforms the **UNLZ AI Studio** into an autonomous research agent. It uses the **Model Context Protocol (MCP)** to expose local university resources (files, hardware stats) to an agentic workflow orchestrated by **n8n** and powered by **Supabase** for memory and RAG.
+This project transforms the **UNLZ AI Studio** into an autonomous research agent. It orchestrates a local agentic workflow using **n8n**, integrating **Model Context Protocol (MCP)** for resource access and a flexible **RAG** pipeline for knowledge retrieval.
 
 ## Architecture
 
@@ -18,13 +16,15 @@ graph TD
     G[Web GUI<br/>Next.js] -->|Chat/Webhook| C
 ```
 
-## Senior Features (New!)
+## System Capabilities
 
-This agent includes advanced engineering patterns:
+This application is engineered ensuring modularity, security, and scalability:
 
-- **RAG Pipeline**: `rag_pipeline/ingest.py` effectively chunks and embeds academic PDFs into Supabase Vector.
-- **Guardrails**: `guardrails/validator.py` ensures query safety before processing (Preventing Prompt Injection).
-- **MCP Tools**: Custom server exposing Python logic to the n8n agent.
+- **Hybrid RAG Architecture**: A flexible pipeline (`rag_pipeline/`) that supports both local persistence (ChromaDB) and cloud-based vector storage (Supabase), configurable via environment variables.
+- **Security Guardrails**: Integrated input/output validation layer (`guardrails/`) to sanitise queries and prevent prompt injection attacks.
+- **Extensible Tooling (MCP)**: Custom Model Context Protocol server exposing Python-based utilities to the agentic workflow.
+- **Centralized Configuration**: Unified settings management (`config.py`) implementing the Factory pattern to switch between Local (Ollama) and Cloud (OpenAI) inference providers dynamically.
+- **Modern Frontend**: A responsive Next.js web interface for agent interaction and system monitoring.
 
 ## Setup
 
