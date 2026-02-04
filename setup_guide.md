@@ -89,6 +89,16 @@ The project includes a modern Next.js interface.
     ```
 4.  Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+## 7. Configuring the Agent (Hybrid Mode)
+
+Go to [http://localhost:3000/settings](http://localhost:3000/settings) to configure your stack:
+
+- **Vector DB**: Choose between Local (ChromaDB) or Cloud (Supabase).
+- **LLM**: Choose between Ollama or OpenAI.
+- **n8n URL**: Set your Webhook URL.
+
+Settings are saved to your local `.env` file automatically.
+
 ## Diagram
 
 refer to `README.md` for the architecture overview.
