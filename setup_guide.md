@@ -1,5 +1,7 @@
 # Setup Guide: UNLZ Agent Integration
 
+[🇬🇧 English](setup_guide.md) | [🇪🇸 Español](setup_guide_ES.md)
+
 This guide explains how to connect your **Ollama**, **Local n8n**, and **Supabase** using this MCP server.
 
 ## 1. Environment Setup

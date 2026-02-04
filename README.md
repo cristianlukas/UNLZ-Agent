@@ -1,5 +1,7 @@
 # Autonomous University Researcher Agent
 
+[🇬🇧 English](README.md) | [🇪🇸 Español](README_ES.md)
+
 ## Overview
 
 This project transforms the **UNLZ AI Studio** into an autonomous research agent. It uses the **Model Context Protocol (MCP)** to expose local university resources (files, hardware stats) to an agentic workflow orchestrated by **n8n** and powered by **Supabase** for memory and RAG.

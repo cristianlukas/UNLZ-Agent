@@ -1,5 +1,7 @@
 # Next Steps & Roadmap
 
+[🇬🇧 English](Next-Steps.md) | [🇪🇸 Español](Next-Steps_ES.md)
+
 Now that the core structure is in place, follow this roadmap to finalize the project for your portfolio.
 
 ## Phase 1: Integration (Getting it Running)
