@@ -1,0 +1,81 @@
+{
+  "name": "Autonomous University Researcher",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Agent Workflow\n1. Receive Query\n2. Check Local Knowledge (Supabase)\n3. Check Local Server Status (MCP)\n4. Generate Answer via Local LLM (UNLZ Bridge)"
+      },
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        380,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": "qwen2.5-coder-30b",
+        "messages": {
+          "values": [
+            {
+              "content": "={{$json.query}}"
+            }
+          ]
+        }
+      },
+      "name": "Local LLM (UNLZ)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1,
+      "position": [
+        860,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "1",
+          "name": "Local UNLZ Studio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Get system hardware stats",
+        "toolName": "get_system_stats",
+        "method": "POST",
+        "url": "http://localhost:8000/tools/call",
+        "authentication": "none"
+      },
+      "name": "MCP Tool: System Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        660,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Local LLM (UNLZ)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

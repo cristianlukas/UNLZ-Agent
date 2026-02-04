@@ -1,0 +1,81 @@
+import asyncio
+import os
+import psutil
+from mcp.server.fastmcp import FastMCP
+
+# Initialize the MCP server
+mcp = FastMCP("UNLZ-Agent-Server")
+
+# Configuration: Path to UNLZ AI Studio data
+# Assuming UNLZ-Agent and UNLZ-AI-STUDIO are in the same parent directory (GitHub folder)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STUDIO_DATA_PATH = os.path.join(BASE_DIR, "..", "UNLZ-AI-STUDIO", "system", "data")
+
+@mcp.tool()
+def get_system_stats() -> dict:
+    """
+    Get current system hardware statistics (CPU, RAM, simulated GPU).
+    Useful for the agent to decide which model limit to use.
+    """
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory = psutil.virtual_memory()
+    
+    # Simulating GPU stats since we might not have nvidia-smi in this dev environment
+    # In a real deployment, use pynvml or subprocess to call nvidia-smi
+    gpu_stats = {
+        "name": "NVIDIA GeForce RTX 3060 (Simulated)",
+        "memory_total": 12288, # MB
+        "memory_used": 4096,   # MB
+        "utilization": 35      # Percent
+    }
+
+    return {
+        "cpu_usage_percent": cpu_percent,
+        "ram_total_gb": round(memory.total / (1024**3), 2),
+        "ram_available_gb": round(memory.available / (1024**3), 2),
+        "ram_percent": memory.percent,
+        "gpu_stats": gpu_stats
+    }
+
+@mcp.tool()
+def list_studio_data_files() -> list[str]:
+    """
+    List files available in the UNLZ AI Studio system/data directory.
+    These files might contain user configurations, logs, or knowledge base items.
+    """
+    if not os.path.exists(STUDIO_DATA_PATH):
+        return [f"Error: Directory not found at {STUDIO_DATA_PATH}"]
+    
+    try:
+        files = []
+        for filename in os.listdir(STUDIO_DATA_PATH):
+            full_path = os.path.join(STUDIO_DATA_PATH, filename)
+            if os.path.isfile(full_path):
+                files.append(filename)
+        return files
+    except Exception as e:
+        return [f"Error listing files: {str(e)}"]
+
+@mcp.tool()
+def read_studio_file(filename: str) -> str:
+    """
+    Read the content of a specific file from the UNLZ AI Studio data directory.
+    Args:
+        filename: The name of the file to read (must be in system/data).
+    """
+    safe_filename = os.path.basename(filename)
+    file_path = os.path.join(STUDIO_DATA_PATH, safe_filename)
+    
+    if not os.path.exists(file_path):
+        return f"Error: File '{safe_filename}' not found."
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+if __name__ == "__main__":
+    print(f"Starting UNLZ Agent MCP Server...")
+    print(f"Monitoring Data Path: {STUDIO_DATA_PATH}")
+    mcp.run()
