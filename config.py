@@ -8,6 +8,7 @@ class Config:
     # Provider Settings
     VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").lower() # chroma | supabase
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower() # ollama | openai
+    AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "en").lower() # en | es | zh
     
     # Paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))

@@ -1,11 +1,15 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-foreground-rgb: 236 237 238;
+  --color-background-start-rgb: 0 0 0;
+  --color-background-end-rgb: 0 0 0;
+}
 
 :root {
-  --foreground-rgb: 236, 237, 238;
-  --background-start-rgb: 0, 0, 0;
-  --background-end-rgb: 0, 0, 0;
+  --foreground-rgb: 236 237 238;
+  --background-start-rgb: 0 0 0;
+  --background-end-rgb: 0 0 0;
 }
 
 body {

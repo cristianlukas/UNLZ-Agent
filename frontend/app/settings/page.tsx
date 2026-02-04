@@ -8,6 +8,7 @@ export default function Settings() {
     N8N_WEBHOOK_URL: '',
     VECTOR_DB_PROVIDER: 'chroma',
     LLM_PROVIDER: 'ollama',
+    AGENT_LANGUAGE: 'en',
     SUPABASE_URL: '',
     SUPABASE_KEY: '',
     OPENAI_API_KEY: ''
@@ -32,7 +33,6 @@ export default function Settings() {
   };
 
   return (
-  return (
     <div className="min-h-screen bg-[#09090b] text-gray-100 p-8 font-sans flex items-center justify-center">
       <div className="w-full max-w-2xl animate-fadeIn">
         
@@ -49,6 +49,22 @@ export default function Settings() {
           
           {/* Architecture Toggles */}
           <div className="space-y-6">
+            <div>
+              <label className="block text-sm font-medium text-gray-400 mb-2">Agent Language</label>
+               <div className="relative">
+                <select 
+                  value={config.AGENT_LANGUAGE}
+                  onChange={(e) => setConfig({ ...config, AGENT_LANGUAGE: e.target.value })}
+                  className="w-full bg-[#09090b] border border-[#27272a] rounded-lg p-3 text-sm focus:border-gray-500 outline-none appearance-none transition-colors"
+                >
+                  <option value="en">English (English)</option>
+                  <option value="es">Español (Spanish)</option>
+                  <option value="zh">中文 (Chinese)</option>
+                </select>
+                <div className="absolute right-3 top-3.5 pointer-events-none text-gray-500">▼</div>
+              </div>
+            </div>
+
             <div>
               <label className="block text-sm font-medium text-gray-400 mb-2">Vector Database Provider</label>
               <div className="relative">
