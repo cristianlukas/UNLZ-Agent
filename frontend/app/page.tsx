@@ -31,7 +31,9 @@ const dictionary: any = {
     placeholder: 'Ask anything...',
     systemOnline: 'SYSTEM ONLINE',
     systemOffline: 'SYSTEM OFFLINE',
-    disclaimer: 'UNLZ Agent can make mistakes. Check important information.'
+    disclaimer: 'UNLZ Agent can make mistakes. Check important information.',
+    status: 'STATUS',
+    error: '⚠️ Error connecting to the agent. Please check if n8n is running.'
   },
   es: {
     welcome: '¡Hola! Soy el **Agente UNLZ**. Puedo ayudarte a investigar documentos universitarios, buscar en la web o responder preguntas generales.\n\n¿En qué puedo ayudarte hoy?',
@@ -43,7 +45,9 @@ const dictionary: any = {
     placeholder: 'Pregunta lo que sea...',
     systemOnline: 'SISTEMA ONLINE',
     systemOffline: 'SISTEMA OFFLINE',
-    disclaimer: 'El Agente UNLZ puede cometer errores. Verifica la información importante.'
+    disclaimer: 'El Agente UNLZ puede cometer errores. Verifica la información importante.',
+    status: 'ESTADO',
+    error: '⚠️ Error al conectar con el agente. Verifica si n8n se está ejecutando.'
   },
   zh: {
     welcome: '你好！我是 **UNLZ Agent**。我可以帮你查阅大学文件、搜索网络或回答一般问题。\n\n今天有什么可以帮你的吗？',
@@ -55,7 +59,9 @@ const dictionary: any = {
     placeholder: '随便问...',
     systemOnline: '系统在线',
     systemOffline: '系统离线',
-    disclaimer: 'UNLZ Agent 可能会犯错。请核实重要信息。'
+    disclaimer: 'UNLZ Agent 可能会犯错。请核实重要信息。',
+    status: '状态',
+    error: '⚠️ 连接代理时出错。请检查 n8n 是否正在运行。'
   }
 };
 
@@ -138,7 +144,7 @@ export default function Home() {
       setMessages(prev => [...prev, { role: 'assistant', content: botText }]);
     } catch (error) {
       console.error('Error:', error);
-      setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ Error connecting to the agent. Please check if n8n is running.' }]);
+      setMessages(prev => [...prev, { role: 'assistant', content: t.error }]);
     } finally {
       setIsLoading(false);
     }
@@ -163,17 +169,17 @@ export default function Home() {
       <div className={`${sidebarOpen ? 'w-[260px]' : 'w-0'} bg-black flex-shrink-0 transition-all duration-300 ease-in-out border-r border-[#27272a] flex flex-col overflow-hidden`}>
         <div className="p-3">
           <button 
-            onClick={() => setMessages([{ role: 'assistant', content: 'Hello! I am the **UNLZ Agent**. How can I help you today?' }])}
+            onClick={() => setMessages([{ role: 'assistant', content: t.welcome }])}
             className="flex items-center gap-3 w-full px-3 py-3 rounded-lg border border-[#27272a] hover:bg-[#27272a] transition-colors text-sm text-left text-white"
           >
             <Plus size={16} />
-            <span>New Chat</span>
+            <span>{t.newChat}</span>
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-2">
-            <div className="text-xs font-semibold text-gray-500 mb-3 px-2">History</div>
-            <div className="text-xs text-gray-600 px-2 italic">No recent chats</div>
+            <div className="text-xs font-semibold text-gray-500 mb-3 px-2">{t.history}</div>
+            <div className="text-xs text-gray-600 px-2 italic">{t.noHistory}</div>
         </div>
 
         <div className="p-3 border-t border-[#27272a]">
@@ -181,7 +187,7 @@ export default function Home() {
                  <div className="flex flex-col gap-1 px-3 py-2 text-xs mb-2 bg-[#18181b] rounded border border-[#27272a]">
                     <div className="flex items-center gap-2 font-mono font-bold text-gray-400 border-b border-[#27272a] pb-1 mb-1">
                         <span className={`w-2 h-2 rounded-full ${stats.status === 'online' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-                        STATUS: {stats.status.toUpperCase()}
+                        {t.status}: {stats.status.toUpperCase()}
                     </div>
                     {stats.components && Object.entries(stats.components).map(([key, val]: any) => (
                         <div key={key} className="flex justify-between items-center">
@@ -196,11 +202,11 @@ export default function Home() {
             )}
             <Link href="/settings" className="flex items-center gap-3 w-full px-3 py-3 rounded-lg hover:bg-[#27272a] transition-colors text-sm text-gray-200">
                 <Settings size={18} />
-                <span>Settings</span>
+                <span>{t.settings}</span>
             </Link>
              <div className="flex items-center gap-3 px-3 py-3 mt-1">
                 <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-xs font-bold">U</div>
-                <div className="text-sm font-medium">User</div>
+                <div className="text-sm font-medium">{t.user}</div>
             </div>
         </div>
       </div>
@@ -290,7 +296,7 @@ export default function Home() {
                             handleSubmit(e);
                         }
                     }}
-                    placeholder="Ask anything..."
+                    placeholder={t.placeholder}
                     className="w-full bg-transparent text-white placeholder-gray-500 outline-none resize-none max-h-32 py-1 scrollbar-hide"
                     rows={1}
                 />
@@ -306,7 +312,7 @@ export default function Home() {
                 </button>
             </form>
             <div className="text-center text-xs text-gray-500 mt-2">
-                UNLZ Agent can make mistakes. Check important information.
+                {t.disclaimer}
             </div>
           </div>
         </div>

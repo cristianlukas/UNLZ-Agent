@@ -9,23 +9,54 @@ declare global {
 
 const SERVER_SCRIPT = path.join(process.cwd(), '..', 'mcp_server.py');
 
+// Graceful Shutdown Hook
+// In dev, this might be triggered by rs (restart) or stopping the server
+if (process.env.NODE_ENV !== 'production') {
+  const cleanup = () => {
+    if (global.mcpProcess) {
+      console.log('Cleaning up MCP process...');
+      global.mcpProcess.kill();
+    }
+  };
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+  process.on('exit', cleanup);
+} else {
+  // Production cleanup logic if needed
+}
+
 export async function POST(req: Request) {
   try {
     const { action } = await req.json();
 
     if (action === 'start') {
-      if (global.mcpProcess && !global.mcpProcess.killed) {
+      // Check if process exists AND hasn't exited
+      if (global.mcpProcess && global.mcpProcess.exitCode === null && !global.mcpProcess.killed) {
         return NextResponse.json({ status: 'running', message: 'Server already running' });
       }
 
-      console.log('Spawning MCP Server:', SERVER_SCRIPT);
-      // Spawn python process
-      // Ensure python is in path or use specific path
-      global.mcpProcess = spawn('python', ['-u', SERVER_SCRIPT], { // -u for unbuffered output
+      // Try to determine python command
+      const pythonCommand = process.platform === 'win32' ? 'python' : 'python3';
+      const port = process.env.MCP_PORT || '8000';
+      
+      console.log(`Spawning MCP Server with: ${pythonCommand} ${SERVER_SCRIPT} (Port: ${port})`);
+      
+      global.mcpProcess = spawn(pythonCommand, ['-u', SERVER_SCRIPT], { 
         cwd: path.dirname(SERVER_SCRIPT),
-        stdio: 'ignore' // or 'pipe' to log to file
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, MCP_PORT: port } 
       });
       
+      if (global.mcpProcess.stdout) {
+        global.mcpProcess.stdout.on('data', (data) => console.log(`MCP STDOUT: ${data}`));
+      }
+      if (global.mcpProcess.stderr) {
+        global.mcpProcess.stderr.on('data', (data) => console.error(`MCP STDERR: ${data}`));
+      }
+      
+      global.mcpProcess.on('error', (err) => console.error('Failed to start MCP process:', err));
+      global.mcpProcess.on('close', (code) => console.log(`MCP process exited with code ${code}`));
+
       console.log(`MCP Server started with PID: ${global.mcpProcess.pid}`);
       
       return NextResponse.json({ status: 'started', pid: global.mcpProcess.pid });
@@ -42,7 +73,7 @@ export async function POST(req: Request) {
     
     // Status Check (Check port 8000 typically better, but pid is okay for local spawn)
     if (action === 'status') {
-      const isRunning = global.mcpProcess && !global.mcpProcess.killed;
+      const isRunning = global.mcpProcess && global.mcpProcess.exitCode === null && !global.mcpProcess.killed;
       return NextResponse.json({ status: isRunning ? 'running' : 'stopped' });
     }
 

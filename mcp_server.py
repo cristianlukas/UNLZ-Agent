@@ -132,10 +132,16 @@ def read_studio_file(filename: str) -> str:
         return f"Error reading file: {str(e)}"
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    port = int(os.getenv("MCP_PORT", "8000"))
     print(f"Starting UNLZ Agent MCP Server...")
     print(f"Monitoring Data Path: {STUDIO_DATA_PATH}")
+    print(f"Listening on port: {port}")
+    
     # Run with SSE transport on port 8000 for local connectivity (n8n/Next.js)
     try:
-        mcp.run(transport="sse", port=8000)
+        mcp.run(transport="sse", port=port)
     except Exception as e:
         print(f"Server Error: {e}")
