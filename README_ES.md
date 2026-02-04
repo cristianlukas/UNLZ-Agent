@@ -45,7 +45,8 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
     cd UNLZ-Agent
     ```
 
-2.  **Configurar Entorno Python**:
+2.  **Configuración del Backend (Python)**:
+    Necesario para el servidor MCP y el pipeline RAG.
 
     ```bash
     # Crear entorno virtual
@@ -61,7 +62,8 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
     pip install -r requirements.txt
     ```
 
-3.  **Configurar Frontend**:
+3.  **Configuración del Frontend (Node.js)**:
+    Necesario para la interfaz web.
 
     ```bash
     cd frontend
@@ -70,13 +72,14 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
     yarn install
     ```
 
-4.  **Configurar Entorno**:
-    Crea un archivo `.env` en el directorio raíz:
+4.  **Configuración (Opcional)**:
+    Puedes configurar el agente directamente desde la página de **Configuración** en la interfaz web.
+    Alternativamente, crea un archivo `.env` en el directorio raíz:
+
     ```env
-    # Ejemplo de contenido .env
+    # Opcional: Pre-configurar ajustes
     VECTOR_DB_PROVIDER=chroma
     LLM_PROVIDER=ollama
-    OLLAMA_BASE_URL=http://localhost:11434
     MCP_PORT=8000
     ```
 

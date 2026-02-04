@@ -45,7 +45,8 @@ This application is engineered ensuring modularity, security, and scalability:
     cd UNLZ-Agent
     ```
 
-2.  **Set up Python Environment**:
+2.  **Backend Setup (Python)**:
+    Required for the MCP Server and RAG pipeline.
 
     ```bash
     # Create virtual environment
@@ -61,7 +62,8 @@ This application is engineered ensuring modularity, security, and scalability:
     pip install -r requirements.txt
     ```
 
-3.  **Set up Frontend**:
+3.  **Frontend Setup (Node.js)**:
+    Required for the Web Interface.
 
     ```bash
     cd frontend
@@ -70,13 +72,14 @@ This application is engineered ensuring modularity, security, and scalability:
     yarn install
     ```
 
-4.  **Configure Environment**:
-    Create a `.env` file in the root directory (use established example if available):
+4.  **Configuration (Optional)**:
+    You can configure the agent directly via the **Settings** page in the Web GUI.
+    Alternatively, create a `.env` file in the root directory:
+
     ```env
-    # Example .env content
+    # Optional: Pre-configure settings
     VECTOR_DB_PROVIDER=chroma
     LLM_PROVIDER=ollama
-    OLLAMA_BASE_URL=http://localhost:11434
     MCP_PORT=8000
     ```
 
