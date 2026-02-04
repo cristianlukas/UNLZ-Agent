@@ -38,8 +38,6 @@ This application is engineered ensuring modularity, security, and scalability:
 
 ### 2. Installation
 
-### 2. Installation
-
 1.  **Clone the repository**:
 
     ```bash

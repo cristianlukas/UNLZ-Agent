@@ -38,8 +38,6 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
 
 ### 2. Instalación
 
-### 2. Instalación
-
 1.  **Clonar el repositorio**:
 
     ```bash
