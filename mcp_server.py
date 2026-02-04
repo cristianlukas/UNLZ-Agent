@@ -133,6 +133,9 @@ def read_studio_file(filename: str) -> str:
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
+    import uvicorn
+    import os
+    
     load_dotenv()
     
     port = int(os.getenv("MCP_PORT", "8000"))
@@ -140,8 +143,10 @@ if __name__ == "__main__":
     print(f"Monitoring Data Path: {STUDIO_DATA_PATH}")
     print(f"Listening on port: {port}")
     
-    # Run with SSE transport on port 8000 for local connectivity (n8n/Next.js)
+    # Run with SSE transport using uvicorn directly
+    # We allow allowing all hosts for now since it is local dev
     try:
-        mcp.run(transport="sse", port=port)
+        # mcp.sse_app is the Starlette/FastAPI compatible ASGI app
+        uvicorn.run(mcp.sse_app, host="0.0.0.0", port=port)
     except Exception as e:
         print(f"Server Error: {e}")
