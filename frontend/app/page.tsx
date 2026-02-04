@@ -19,9 +19,50 @@ type Message = {
   content: string;
 };
 
+// Simple Translation Dictionary
+const dictionary: any = {
+  en: {
+    welcome: 'Hello! I am the **UNLZ Agent**. I can help you research university documents, search the web, or answer general questions.\n\nHow can I help you today?',
+    newChat: 'New Chat',
+    history: 'History',
+    noHistory: 'No recent chats',
+    settings: 'Settings',
+    user: 'User',
+    placeholder: 'Ask anything...',
+    systemOnline: 'SYSTEM ONLINE',
+    systemOffline: 'SYSTEM OFFLINE',
+    disclaimer: 'UNLZ Agent can make mistakes. Check important information.'
+  },
+  es: {
+    welcome: '¡Hola! Soy el **Agente UNLZ**. Puedo ayudarte a investigar documentos universitarios, buscar en la web o responder preguntas generales.\n\n¿En qué puedo ayudarte hoy?',
+    newChat: 'Nuevo Chat',
+    history: 'Historial',
+    noHistory: 'Sin chats recientes',
+    settings: 'Configuración',
+    user: 'Usuario',
+    placeholder: 'Pregunta lo que sea...',
+    systemOnline: 'SISTEMA ONLINE',
+    systemOffline: 'SISTEMA OFFLINE',
+    disclaimer: 'El Agente UNLZ puede cometer errores. Verifica la información importante.'
+  },
+  zh: {
+    welcome: '你好！我是 **UNLZ Agent**。我可以帮你查阅大学文件、搜索网络或回答一般问题。\n\n今天有什么可以帮你的吗？',
+    newChat: '新对话',
+    history: '历史记录',
+    noHistory: '无最近对话',
+    settings: '设置',
+    user: '用户',
+    placeholder: '随便问...',
+    systemOnline: '系统在线',
+    systemOffline: '系统离线',
+    disclaimer: 'UNLZ Agent 可能会犯错。请核实重要信息。'
+  }
+};
+
 export default function Home() {
+  const [lang, setLang] = useState<'en' | 'es' | 'zh'>('en');
   const [messages, setMessages] = useState<Message[]>([
-    { role: 'assistant', content: 'Hello! I am the **UNLZ Agent**. I can help you research university documents, search the web, or answer general questions.\n\nHow can I help you today?' }
+    { role: 'assistant', content: '...' } // Will update with effect
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -51,8 +92,36 @@ export default function Home() {
     };
     fetchHealth();
     const interval = setInterval(fetchHealth, 10000); // Poll every 10s
+  // Poll for system stats AND check/start MCP Server
+  useEffect(() => {
+    // 1. Fetch Config to get Language
+    fetch('/api/settings').then(res => res.json()).then(data => {
+        if (data.AGENT_LANGUAGE) setLang(data.AGENT_LANGUAGE as 'en' | 'es' | 'zh');
+    });
+
+    // 2. Auto-Start MCP Server
+    fetch('/api/system/control', { 
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'start' })
+    }).catch(console.error);
+
+    // 3. Health Poll
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch('/api/health');
+        const data = await res.json();
+        setStats(data);
+      } catch (e) {
+        setStats({ status: 'offline', components: {} });
+      }
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 10000); 
     return () => clearInterval(interval);
   }, []);
+
+  const t = dictionary[lang] || dictionary.en;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

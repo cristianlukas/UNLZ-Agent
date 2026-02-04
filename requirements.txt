@@ -14,3 +14,4 @@ python-dotenv
 duckduckgo-search
 # Guardrails
 pydantic
+uvicorn

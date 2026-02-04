@@ -3,6 +3,12 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
+const dictionary: any = {
+  en: { title: 'Settings', back: 'Esc', save: 'Save Changes', saving: 'Saving...', saved: 'Settings Saved!' },
+  es: { title: 'Configuración', back: 'Esc', save: 'Guardar Cambios', saving: 'Guardando...', saved: '¡Configuración Guardada!' },
+  zh: { title: '设置', back: '退出', save: '保存更改', saving: '保存中...', saved: '设置已保存！' }
+};
+
 export default function Settings() {
   const [config, setConfig] = useState({
     N8N_WEBHOOK_URL: '',
@@ -30,8 +36,11 @@ export default function Settings() {
       body: JSON.stringify(config)
     });
     setSaving(false);
-    alert('Settings Saved! Restart backend services manually.');
+    // instant feedback, no alert required for language, but maybe for server
+    // alert(t.saved); 
   };
+  
+  const t = dictionary[config.AGENT_LANGUAGE as 'en' | 'es' | 'zh'] || dictionary.en;
 
   return (
     <div className="min-h-screen bg-[#09090b] text-gray-100 p-8 font-sans flex items-center justify-center">
@@ -39,10 +48,10 @@ export default function Settings() {
         
         <div className="flex items-center justify-between mb-8">
             <h1 className="text-2xl font-bold text-white tracking-tight">
-              Settings
+              {t.title}
             </h1>
             <Link href="/" className="px-4 py-2 rounded-lg bg-[#27272a] hover:bg-[#3f3f46] text-sm text-gray-200 transition-colors">
-                Esc
+                {t.back}
             </Link>
         </div>
 
@@ -164,7 +173,7 @@ export default function Settings() {
               disabled={saving}
               className="bg-white text-black hover:bg-gray-200 px-6 py-2.5 rounded-lg font-medium text-sm transition-all active:scale-95 disabled:opacity-50"
             >
-              {saving ? 'Saving...' : 'Save Changes'}
+              {saving ? t.saving : t.save}
             </button>
           </div>
 

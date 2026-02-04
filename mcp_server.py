@@ -134,4 +134,8 @@ def read_studio_file(filename: str) -> str:
 if __name__ == "__main__":
     print(f"Starting UNLZ Agent MCP Server...")
     print(f"Monitoring Data Path: {STUDIO_DATA_PATH}")
-    mcp.run()
+    # Run with SSE transport on port 8000 for local connectivity (n8n/Next.js)
+    try:
+        mcp.run(transport="sse", port=8000)
+    except Exception as e:
+        print(f"Server Error: {e}")
