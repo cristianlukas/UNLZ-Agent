@@ -73,6 +73,31 @@ Si estás ejecutando n8n vía Docker, necesitas asegurarte de que pueda alcanzar
 2.  Habilita la extensión `pgvector` en el Editor SQL: `create extension vector;`
 3.  En n8n, usa el nodo **Supabase Vector Store** para insertar y recuperar documentos.
 
+## 6. Ejecutar la Interfaz Web (Frontend)
+
+El proyecto incluye una interfaz moderna en Next.js.
+
+1.  Abre una nueva terminal.
+2.  Navega a la carpeta frontend:
+    ```powershell
+    cd frontend
+    ```
+3.  Inicia el servidor de desarrollo:
+    ```powershell
+    npm run dev
+    ```
+4.  Abre [http://localhost:3000](http://localhost:3000) en tu navegador.
+
+## 7. Configurando el Agente (Modo Híbrido)
+
+Ve a [http://localhost:3000/settings](http://localhost:3000/settings) para configurar tu stack:
+
+- **Vector DB**: Elige entre Local (ChromaDB) o Cloud (Supabase).
+- **LLM**: Elige entre Ollama o OpenAI.
+- **URL de n8n**: Establece tu URL del Webhook.
+
+Las configuraciones se guardan automáticamente en tu archivo `.env` local.
+
 ## Diagrama
 
 referirse a `README_ES.md` para la descripción general de la arquitectura.

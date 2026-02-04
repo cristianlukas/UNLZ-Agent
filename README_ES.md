@@ -42,8 +42,17 @@ Esta aplicación está diseñada priorizando la modularidad, la seguridad y la e
 pip install -r requirements.txt
 ```
 
-### 3. Ejecutar el Servidor MCP
+### 3. Ejecutar el Backend (Servidor MCP)
 
 ```bash
 python mcp_server.py
 ```
+
+### 4. Ejecutar el Frontend (Interfaz Web)
+
+```bash
+cd frontend
+npm run dev
+```
+
+Abre [http://localhost:3000](http://localhost:3000) para usar el UNLZ Agent.

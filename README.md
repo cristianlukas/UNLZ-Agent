@@ -42,8 +42,17 @@ This application is engineered ensuring modularity, security, and scalability:
 pip install -r requirements.txt
 ```
 
-### 3. Running the MCP Server
+### 3. Running the Backend (MCP Server)
 
 ```bash
 python mcp_server.py
 ```
+
+### 4. Running the Frontend (Web GUI)
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) to use the UNLZ Agent.
