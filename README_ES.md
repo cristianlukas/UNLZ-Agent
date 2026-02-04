@@ -10,11 +10,11 @@ Este proyecto transforma el **UNLZ AI Studio** en un agente de investigación au
 
 ```mermaid
 graph TD
-    A[UNLZ AI Studio\nPC Local] -->|Protocolo MCP| B(Servidor MCP\nScript Python)
-    B -->|Expone Herramientas| C[Flujo de trabajo n8n\nOrquestador de Agente Local]
-    C -->|Almacena/Recupera| D[Supabase\nBase de Datos Vectorial y Memoria]
+    A[UNLZ AI Studio<br/>PC Local] -->|Protocolo MCP| B(Servidor MCP<br/>Script Python)
+    B -->|Expone Herramientas| C[Flujo de trabajo n8n<br/>Orquestador de Agente Local]
+    C -->|Almacena/Recupera| D[Supabase<br/>Base de Datos Vectorial y Memoria]
     C -->|Busqueda| E[Herramienta de Búsqueda Web]
-    C -->|Inferencia LLM| F[Ollama\nLocalhost:11434]
+    C -->|Inferencia LLM| F[Ollama<br/>Localhost:11434]
 ```
 
 ## Configuración

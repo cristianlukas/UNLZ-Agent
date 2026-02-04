@@ -10,11 +10,11 @@ This project transforms the **UNLZ AI Studio** into an autonomous research agent
 
 ```mermaid
 graph TD
-    A[UNLZ AI Studio\nLocal PC] -->|MCP Protocol| B(MCP Server\nPython Script)
-    B -->|Exposes Tools| C[n8n Workflow\nLocal Agent Orchestrator]
-    C -->|Stores/Retrieves| D[Supabase\nVector DB & Memory]
+    A[UNLZ AI Studio<br/>Local PC] -->|MCP Protocol| B(MCP Server<br/>Python Script)
+    B -->|Exposes Tools| C[n8n Workflow<br/>Local Agent Orchestrator]
+    C -->|Stores/Retrieves| D[Supabase<br/>Vector DB & Memory]
     C -->|Search| E[Web Search Tool]
-    C -->|LLM Inference| F[Ollama\nLocalhost:11434]
+    C -->|LLM Inference| F[Ollama<br/>Localhost:11434]
 ```
 
 ## Setup
