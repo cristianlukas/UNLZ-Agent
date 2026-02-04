@@ -1,6 +1,6 @@
 # Setup Guide: UNLZ Agent Integration
 
-This guide explains how to connect your **UNLZ AI Studio**, **n8n**, and **Supabase** using this MCP server.
+This guide explains how to connect your **Ollama**, **Local n8n**, and **Supabase** using this MCP server.
 
 ## 1. Environment Setup
 
@@ -27,41 +27,34 @@ Documents/GitHub/
 
 ## 2. Running the MCP Server
 
-You can run the server directly to test it:
+Run the server to expose local tools:
 
 ```powershell
 python mcp_server.py
 ```
 
-_Note: This server is designed to be used by an MCP Client (like Claude Desktop or n8n's MCP integration)._
+## 3. Running Ollama (Authentication-Free LLM)
 
-## 3. Connecting to n8n (The "Agent")
-
-Since n8n is running locally (or via Docker), you have two options to connect this Python script:
-
-### Option A: Standard Output (stdio) - **Recommended for local n8n**
-
-If you are running n8n locally via `npm` or desktop app:
-
-1.  In n8n, look for "MCP" or "Model Context Protocol" execution nodes (if available in your version).
-2.  Command: `python`
-3.  Args: `C:\Users\Cristian\Documents\GitHub\UNLZ-Agent\mcp_server.py`
-
-### Option B: SSE (Server Sent Events) - **For Docker/Remote n8n**
-
-(Optional) If you need to expose this as a web server, modify `mcp_server.py` to use `mcp.run_sse()` instead of `mcp.run()`.
-
-## 4. Connecting UNLZ AI Studio to the Internet (Web Bridge)
-
-To let your n8n agent control the LLMs, you need to expose the UNLZ AI Studio API.
-
-1.  Start UNLZ AI Studio: `python system/web_bridge.py` (Port 5000)
-2.  Use **Cloudflare Tunnel** (Free) to expose it:
+1.  Download and install [Ollama](https://ollama.com/).
+2.  Pull a model (e.g., Qwen 2.5 Coder, excellent for this task):
     ```powershell
-    cloudflared tunnel --url http://localhost:5000
+    ollama pull qwen2.5-coder:14b
     ```
-3.  Copy the `https://....trycloudflare.com` URL.
-4.  In n8n, use this URL for your HTTP Request nodes to `/v1/chat/completions`.
+3.  Verify it's running at `http://localhost:11434`.
+
+## 4. Configuring Local n8n
+
+### Running n8n
+
+If you are running n8n via Docker, you need to ensure it can reach your host machine's Ollama and MCP server.
+
+- Access host services using `http://host.docker.internal:11434` (Ollama) and `http://host.docker.internal:8000` (MCP).
+
+### Workflow Setup
+
+1.  Import `n8n_workflow.json`.
+2.  **Ollama Node**: Ensure the Base URL is set to `http://host.docker.internal:11434` (if in Docker) or `http://localhost:11434` (if native).
+3.  **Supabase**: Connect your free tier credentials for the Vector Store.
 
 ## 5. RAG with Supabase
 

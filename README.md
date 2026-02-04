@@ -9,10 +9,10 @@ This project transforms the **UNLZ AI Studio** into an autonomous research agent
 ```mermaid
 graph TD
     A[UNLZ AI Studio\nLocal PC] -->|MCP Protocol| B(MCP Server\nPython Script)
-    B -->|Exposes Tools| C[n8n Workflow\nAgent Orchestrator]
+    B -->|Exposes Tools| C[n8n Workflow\nLocal Agent Orchestrator]
     C -->|Stores/Retrieves| D[Supabase\nVector DB & Memory]
     C -->|Search| E[Web Search Tool]
-    C -->|LLM Inference| F[Qwen 2.5\nvia Cloudflare/Ngrok]
+    C -->|LLM Inference| F[Ollama\nLocalhost:11434]
 ```
 
 ## Setup
@@ -21,8 +21,8 @@ graph TD
 
 - Python 3.10+
 - n8n (Self-hosted)
+- Ollama (installed locally)
 - Supabase Account (Free Tier)
-- UNLZ AI Studio installed
 
 ### 2. Installation
 

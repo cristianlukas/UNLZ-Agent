@@ -7,15 +7,14 @@ Now that the core structure is in place, follow this roadmap to finalize the pro
 - [ ] **Install Dependencies on Local Machine**
       Run `pip install -r requirements.txt` in this directory.
 
-- [ ] **Connect UNLZ Studio to the Web**
-      Your n8n instance (if running in Docker or cloud) cannot see `localhost:5000` directly.
-  - Install [Cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/).
-  - Run: `cloudflared tunnel --url http://localhost:5000`
-  - Save the generated URL (e.g., `https://random-name.trycloudflare.com`).
+- [ ] **Setup Ollama**
+  - Install Ollama.
+  - Run `ollama pull qwen2.5-coder:14b`.
+  - Ensure it listens on port 11434.
 
 - [ ] **Configure n8n**
-  - Import `n8n_workflow.json` into your n8n instance.
-  - Update the "Local LLM" node with your Cloudflare URL.
+  - Import `n8n_workflow.json` into your local n8n instance.
+  - Setup the Ollama Credentials (Base URL: `http://localhost:11434` or `http://host.docker.internal:11434`).
   - Set up the Supabase credentials in n8n.
 
 - [ ] **Test the Loop**
@@ -48,9 +47,6 @@ Now that the core structure is in place, follow this roadmap to finalize the pro
     1. You asking: "How is the server load?" -> Agent checks MCP -> Returns real stats.
     2. You asking: "Summarize the research on X" -> Agent checks Supabase -> Returns answer.
   - Upload to YouTube/Loom and embed in `README.md`.
-
-- [ ] **Architecture Diagram**
-  - Ensure the Mermaid diagram in `README.md` matches your final setup (e.g., if you added Cloudflare).
 
 - [ ] **Push to GitHub**
   - `git push origin master`

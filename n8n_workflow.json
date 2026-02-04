@@ -1,5 +1,5 @@
 {
-  "name": "Autonomous University Researcher",
+  "name": "Autonomous University Researcher (Local + Ollama)",
   "nodes": [
     {
       "parameters": {},
@@ -13,7 +13,7 @@
     },
     {
       "parameters": {
-        "content": "## Agent Workflow\n1. Receive Query\n2. Check Local Knowledge (Supabase)\n3. Check Local Server Status (MCP)\n4. Generate Answer via Local LLM (UNLZ Bridge)"
+        "content": "## Agent Workflow\n1. Receive Query\n2. Check Local Knowledge (Supabase)\n3. Check Local Server Status (MCP)\n4. Generate Answer via Local Ollama"
       },
       "name": "Note",
       "type": "n8n-nodes-base.stickyNote",
@@ -25,35 +25,43 @@
     },
     {
       "parameters": {
-        "modelId": "qwen2.5-coder-30b",
-        "messages": {
-          "values": [
-            {
-              "content": "={{$json.query}}"
-            }
-          ]
-        }
+        "model": "qwen2.5-coder:14b",
+        "options": {}
       },
-      "name": "Local LLM (UNLZ)",
-      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
       "typeVersion": 1,
       "position": [
         860,
-        300
+        500
       ],
       "credentials": {
-        "openAiApi": {
-          "id": "1",
-          "name": "Local UNLZ Studio"
+        "ollamaApi": {
+          "id": "Local Ollama",
+          "name": "Local Ollama"
         }
       }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{$json.query}}",
+        "options": {}
+      },
+      "name": "Basic LLM Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        860,
+        300
+      ]
     },
     {
       "parameters": {
         "toolDescription": "Get system hardware stats",
         "toolName": "get_system_stats",
         "method": "POST",
-        "url": "http://localhost:8000/tools/call",
+        "url": "http://host.docker.internal:8000/tools/call",
         "authentication": "none"
       },
       "name": "MCP Tool: System Stats",
@@ -70,8 +78,19 @@
       "main": [
         [
           {
-            "node": "Local LLM (UNLZ)",
+            "node": "Basic LLM Chain",
             "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Basic LLM Chain",
+            "type": "ai_languageModel",
             "index": 0
           }
         ]
