@@ -15,12 +15,14 @@ graph TD
     C -->|Stores/Retrieves| D[Supabase<br/>Vector DB & Memory]
     C -->|Search| E[Web Search Tool]
     C -->|LLM Inference| F[Ollama<br/>Localhost:11434]
+    G[Web GUI<br/>Next.js] -->|Chat/Webhook| C
 ```
 
 ## Setup
 
 ### 1. Prerequisites
 
+- Node.js 18+ (for Web GUI)
 - Python 3.10+
 - n8n (Self-hosted)
 - Ollama (installed locally)

@@ -64,6 +64,21 @@ If you are running n8n via Docker, you need to ensure it can reach your host mac
 2.  Enable the `pgvector` extension in SQL Editor: `create extension vector;`
 3.  In n8n, use the **Supabase Vector Store** node to insert and retrieve documents.
 
+## 6. Running the Web GUI (Frontend)
+
+The project includes a modern Next.js interface.
+
+1.  Open a new terminal.
+2.  Navigate to the frontend folder:
+    ```powershell
+    cd frontend
+    ```
+3.  Start the development server:
+    ```powershell
+    npm run dev
+    ```
+4.  Open [http://localhost:3000](http://localhost:3000) in your browser.
+
 ## Diagram
 
 refer to `README.md` for the architecture overview.
