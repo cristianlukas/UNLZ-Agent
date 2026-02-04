@@ -35,6 +35,16 @@ Run the server to expose local tools:
 python mcp_server.py
 ```
 
+### RAG Configuration (Environment Variables)
+
+To enable the RAG pipeline, you must set these environment variables before running the server:
+
+```powershell
+$env:SUPABASE_URL="your-project-url"
+$env:SUPABASE_KEY="your-anon-key"
+python mcp_server.py
+```
+
 ## 3. Running Ollama (Authentication-Free LLM)
 
 1.  Download and install [Ollama](https://ollama.com/).

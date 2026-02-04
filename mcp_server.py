@@ -2,6 +2,7 @@ import asyncio
 import os
 import psutil
 from mcp.server.fastmcp import FastMCP
+from guardrails.validator import validate_input
 
 # Initialize the MCP server
 mcp = FastMCP("UNLZ-Agent-Server")
@@ -36,6 +37,29 @@ def get_system_stats() -> dict:
         "ram_percent": memory.percent,
         "gpu_stats": gpu_stats
     }
+
+@mcp.tool()
+def check_query_safety(query: str) -> dict:
+    """
+    Validate if a user query is safe to process (Guardrails).
+    Returns {"valid": true/false, "error": "..."}
+    """
+    return validate_input(query)
+
+from rag_pipeline.ingest import ingest_documents
+
+@mcp.tool()
+def trigger_rag_ingestion() -> str:
+    """
+    Trigger the RAG ingestion process.
+    Reads PDFs from system/data, chunks them, and uploads to Supabase.
+    Returns a status message.
+    """
+    try:
+        ingest_documents()
+        return "RAG Ingestion completed successfully."
+    except Exception as e:
+        return f"Error during RAG ingestion: {str(e)}"
 
 @mcp.tool()
 def list_studio_data_files() -> list[str]:

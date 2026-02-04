@@ -1,2 +1,12 @@
 mcp>=1.2.0
 psutil
+streamlit
+# RAG Dependencies
+langchain
+langchain-community
+langchain-ollama
+supabase
+pypdf
+tiktoken
+# Guardrails
+pydantic
