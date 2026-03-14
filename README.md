@@ -3,7 +3,7 @@
 # Universidad Nacional de Lomas de Zamora - Facultad de Ingeniería
 # UNLZ Agent: Asistente Autónomo Multi-Modal
 
-[🇬🇧 English](README.md) | [🇪🇸 Español](README_ES.md)
+[🇬🇧 English](README_EN.md) | [🇪🇸 Español](README.md)
 
 ## Descripción General
 
