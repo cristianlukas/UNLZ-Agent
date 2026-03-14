@@ -3,7 +3,7 @@
 # Universidad Nacional de Lomas de Zamora - Facultad de Ingeniería
 # UNLZ Agent: Autonomous Multi-Modal Assistant
 
-[🇬🇧 English](README.md) | [🇪🇸 Español](README_ES.md)
+[🇬🇧 English](README_EN.md) | [🇪🇸 Español](README.md)
 
 This project is a **Multi-Modal Autonomous Agent** designed for flexible research and assistance. It orchestrates a local agentic workflow using **n8n**, integrating **Model Context Protocol (MCP)** for resource access and a flexible **RAG** pipeline for knowledge retrieval.
 
