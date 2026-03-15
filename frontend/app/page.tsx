@@ -33,7 +33,10 @@ const dictionary: any = {
     systemOffline: 'SYSTEM OFFLINE',
     disclaimer: 'UNLZ Agent can make mistakes. Check important information.',
     status: 'STATUS',
-    error: '⚠️ Error connecting to the agent. Please check if n8n is running.'
+    error: '⚠️ Error connecting to the agent. Please check if n8n is running.',
+    uploading: 'Uploading file...',
+    uploadSuccess: 'File uploaded to /data',
+    uploadError: 'Error uploading file'
   },
   es: {
     welcome: '¡Hola! Soy el **Agente UNLZ**. Puedo ayudarte a investigar documentos universitarios, buscar en la web o responder preguntas generales.\n\n¿En qué puedo ayudarte hoy?',
@@ -47,7 +50,10 @@ const dictionary: any = {
     systemOffline: 'SISTEMA OFFLINE',
     disclaimer: 'El Agente UNLZ puede cometer errores. Verifica la información importante.',
     status: 'ESTADO',
-    error: '⚠️ Error al conectar con el agente. Verifica si n8n se está ejecutando.'
+    error: '⚠️ Error al conectar con el agente. Verifica si n8n se está ejecutando.',
+    uploading: 'Subiendo archivo...',
+    uploadSuccess: 'Archivo subido a /data',
+    uploadError: 'Error al subir archivo'
   },
   zh: {
     welcome: '你好！我是 **UNLZ Agent**。我可以帮你查阅大学文件、搜索网络或回答一般问题。\n\n今天有什么可以帮你的吗？',
@@ -61,7 +67,10 @@ const dictionary: any = {
     systemOffline: '系统离线',
     disclaimer: 'UNLZ Agent 可能会犯错。请核实重要信息。',
     status: '状态',
-    error: '⚠️ 连接代理时出错。请检查 n8n 是否正在运行。'
+    error: '⚠️ 连接代理时出错。请检查 n8n 是否正在运行。',
+    uploading: '正在上传文件...',
+    uploadSuccess: '文件已上传到 /data',
+    uploadError: '上传文件时出错'
   }
 };
 
@@ -72,10 +81,12 @@ export default function Home() {
   ]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [stats, setStats] = useState<any>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -138,7 +149,7 @@ export default function Home() {
       if (Array.isArray(data)) {
         botText = data[0]?.output || JSON.stringify(data);
       } else {
-        botText = data.output || data.message || JSON.stringify(data);
+        botText = data.error || data.output || data.message || JSON.stringify(data);
       }
 
       setMessages(prev => [...prev, { role: 'assistant', content: botText }]);
@@ -147,6 +158,56 @@ export default function Home() {
       setMessages(prev => [...prev, { role: 'assistant', content: t.error }]);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+
+    const files = Array.from(fileList);
+    setIsUploading(true);
+
+    const uploaded: string[] = [];
+    const failed: string[] = [];
+
+    try {
+      for (const file of files) {
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const response = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          failed.push(file.name);
+          continue;
+        }
+
+        uploaded.push(data.filename || file.name);
+      }
+
+      if (uploaded.length > 0) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: `${t.uploadSuccess}: ${uploaded.join(', ')}` },
+        ]);
+      }
+
+      if (failed.length > 0) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: `${t.uploadError}: ${failed.join(', ')}` },
+        ]);
+      }
+    } catch (error) {
+      setMessages(prev => [...prev, { role: 'assistant', content: t.uploadError }]);
+    } finally {
+      setIsUploading(false);
+      e.target.value = '';
     }
   };
 
@@ -284,7 +345,20 @@ export default function Home() {
         <div className="p-4 md:p-6 bg-[#09090b]">
           <div className="max-w-3xl mx-auto">
             <form onSubmit={handleSubmit} className="relative flex items-end gap-2 bg-[#18181b] border border-[#27272a] rounded-xl px-4 py-3 shadow-lg focus-within:ring-1 focus-within:ring-gray-500 transition-all">
-                <button type="button" className="text-gray-400 hover:text-white p-1 pb-2">
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    multiple
+                    onChange={handleFileSelect}
+                />
+                <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    className={`text-gray-400 hover:text-white p-1 pb-2 ${isUploading ? 'opacity-60 cursor-wait' : ''}`}
+                    title="/data"
+                >
                     <Plus size={20} />
                 </button>
                 <textarea 
@@ -302,7 +376,7 @@ export default function Home() {
                 />
                 <button 
                   type="submit" 
-                  disabled={isLoading || !input.trim()}
+                  disabled={isLoading || isUploading || !input.trim()}
                   className={`
                     p-2 rounded-lg transition-all duration-200 mb-0.5
                     ${input.trim() ? 'bg-white text-black hover:bg-gray-200' : 'bg-[#27272a] text-gray-500 cursor-not-allowed'}
@@ -311,6 +385,11 @@ export default function Home() {
                   <Send size={16} />
                 </button>
             </form>
+            {isUploading && (
+              <div className="text-xs text-gray-500 mt-2">
+                {t.uploading}
+              </div>
+            )}
             <div className="text-center text-xs text-gray-500 mt-2">
                 {t.disclaimer}
             </div>

@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 
 const ENV_PATH = path.join(process.cwd(), '..', '.env');
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
+const DEFAULT_N8N_WEBHOOK_URL = 'http://127.0.0.1:5678/webhook/chat';
 
 export async function POST(req: Request) {
   try {
@@ -28,7 +30,13 @@ export async function POST(req: Request) {
     Object.keys(body).forEach(key => {
       // Simple validation: only allow uppercase keys likely to be env vars
       if (key === key.toUpperCase() && body[key] !== undefined) {
-         updateEnvVar(key, body[key]);
+         let value = String(body[key]);
+         if (key === 'OLLAMA_BASE_URL' && !value.trim()) {
+           value = DEFAULT_OLLAMA_BASE_URL;
+         } else if (key === 'N8N_WEBHOOK_URL' && !value.trim()) {
+           value = DEFAULT_N8N_WEBHOOK_URL;
+         }
+         updateEnvVar(key, value);
       }
     });
 
@@ -43,7 +51,10 @@ export async function POST(req: Request) {
 
 export async function GET() {
    if (!fs.existsSync(ENV_PATH)) {
-     return NextResponse.json({});
+     return NextResponse.json({
+      OLLAMA_BASE_URL: DEFAULT_OLLAMA_BASE_URL,
+      N8N_WEBHOOK_URL: DEFAULT_N8N_WEBHOOK_URL,
+     });
    }
    
    const envContent = fs.readFileSync(ENV_PATH, 'utf-8');
@@ -53,6 +64,13 @@ export async function GET() {
      const [key, ...rest] = line.split('=');
      if (key && rest) config[key.trim()] = rest.join('=').trim();
    });
+   
+   if (!config.OLLAMA_BASE_URL?.trim()) {
+     config.OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL;
+   }
+   if (!config.N8N_WEBHOOK_URL?.trim()) {
+     config.N8N_WEBHOOK_URL = DEFAULT_N8N_WEBHOOK_URL;
+   }
 
    return NextResponse.json(config);
 }

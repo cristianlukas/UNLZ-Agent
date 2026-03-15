@@ -18,6 +18,26 @@ async function checkUrl(url: string, method: string = 'GET') {
   }
 }
 
+function buildOllamaCheckUrls(baseUrl: string) {
+  const sanitizedBase = baseUrl.trim().replace(/\/+$/, '');
+  const urls = new Set<string>([`${sanitizedBase}/api/tags`]);
+
+  try {
+    const parsed = new URL(sanitizedBase);
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1';
+      urls.add(`${parsed.toString().replace(/\/+$/, '')}/api/tags`);
+    } else if (parsed.hostname === '127.0.0.1') {
+      parsed.hostname = 'localhost';
+      urls.add(`${parsed.toString().replace(/\/+$/, '')}/api/tags`);
+    }
+  } catch {
+    // Keep configured URL only if it cannot be parsed.
+  }
+
+  return Array.from(urls);
+}
+
 export async function GET() {
   const envPath = path.join(process.cwd(), '..', '.env');
   const envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
@@ -39,33 +59,56 @@ export async function GET() {
   // 0. MCP Server Check (Port 8000)
   // 0. MCP Server Check
   const mcpPort = config['MCP_PORT'] || '8000';
-  // Check root / (or a known endpoint) instead of just assuming 8000
-  
-  try {
-      // 500ms timeout just to check connectivity
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 1000);
-      await fetch(`http://localhost:${mcpPort}/`, { signal: controller.signal });
-      clearTimeout(id);
+  // Check both IPv4 and localhost to avoid false negatives on some Windows setups.
+  const mcpUrls = [`http://127.0.0.1:${mcpPort}/`, `http://localhost:${mcpPort}/`];
+  let mcpReachable = false;
+  let lastMcpError: unknown = null;
+
+  for (const mcpUrl of mcpUrls) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 1000);
+    try {
+      await fetch(mcpUrl, { signal: controller.signal });
       checks.mcp = { status: 'ok', details: `MCP Server active on port ${mcpPort}` };
-  } catch (e: any) {
-      if (e.name === 'AbortError') { 
-         checks.mcp = { status: 'warning', details: `MCP Port ${mcpPort} Open (slow)` };
-      } else if (e.cause?.code === 'ECONNREFUSED') {
-         checks.mcp = { status: 'error', details: `Port ${mcpPort} Connection Refused` };
-      } else {
-         checks.mcp = { status: 'ok', details: 'MCP potentially active' }; 
-      }
+      mcpReachable = true;
+      break;
+    } catch (error) {
+      lastMcpError = error;
+    } finally {
+      clearTimeout(id);
+    }
+  }
+
+  if (!mcpReachable) {
+    const err = lastMcpError as { name?: string; cause?: { code?: string } } | null;
+    if (err?.name === 'AbortError') {
+      checks.mcp = { status: 'warning', details: `MCP Port ${mcpPort} Open (slow)` };
+    } else if (err?.cause?.code === 'ECONNREFUSED') {
+      checks.mcp = { status: 'error', details: `Port ${mcpPort} Connection Refused` };
+    } else {
+      checks.mcp = { status: 'error', details: `MCP unreachable on port ${mcpPort}` };
+    }
   }
 
   // 1. LLM Check
   const llmProvider = config['LLM_PROVIDER'] || 'ollama';
   if (llmProvider === 'ollama') {
-    const url = config['OLLAMA_BASE_URL'] || 'http://localhost:11434';
-    const isUp = await checkUrl(`${url}/api/tags`); // Ollama endpoint
-    checks.llm = { 
-        status: isUp ? 'ok' : 'error', 
-        details: isUp ? `Ollama Running at ${url}` : `Ollama unreachable at ${url}`
+    const configuredUrl = config['OLLAMA_BASE_URL']?.trim() || 'http://localhost:11434';
+    const ollamaCheckUrls = buildOllamaCheckUrls(configuredUrl);
+    let reachableUrl = '';
+
+    for (const ollamaCheckUrl of ollamaCheckUrls) {
+      if (await checkUrl(ollamaCheckUrl)) {
+        reachableUrl = ollamaCheckUrl.replace(/\/api\/tags$/, '');
+        break;
+      }
+    }
+
+    checks.llm = {
+      status: reachableUrl ? 'ok' : 'error',
+      details: reachableUrl
+        ? `Ollama Running at ${reachableUrl}`
+        : `Ollama unreachable at ${configuredUrl}`
     };
   } else {
     // OpenAI Check (Basic API Key presence)
@@ -79,10 +122,11 @@ export async function GET() {
   // 2. Vector DB Check
   const vectorProvider = config['VECTOR_DB_PROVIDER'] || 'chroma';
   if (vectorProvider === 'chroma') {
-    // Check if data directory exists (Basic check)
-    // Ideally we would query Chroma, but file check is a good proxy for "local storage ready"
-    // Using default or configured path
-    const dataDir = path.join(process.cwd(), '..', 'data'); 
+    // Ensure local data folder exists for local vector storage.
+    const dataDir = path.join(process.cwd(), '..', 'data');
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
     const exists = fs.existsSync(dataDir);
     checks.vectordb = {
         status: exists ? 'ok' : 'warning',
@@ -98,17 +142,36 @@ export async function GET() {
   }
 
   // 3. n8n Check
-  const n8nUrl = config['N8N_WEBHOOK_URL'];
-  if (n8nUrl) {
-    // Difficult to "ping" a webhook without triggering it, so we check if URL looks valid
-    // For a real check, n8n would need a health endpoint
-    const validUrl = n8nUrl.startsWith('http');
-    checks.n8n = {
-        status: validUrl ? 'ok' : 'warning',
-        details: validUrl ? 'Webhook URL configured' : 'Invalid Webhook URL'
-    };
-  } else {
-    checks.n8n = { status: 'error', details: 'Webhook URL not set' };
+  const configuredN8nWebhook =
+    config['N8N_WEBHOOK_URL']?.trim() || 'http://127.0.0.1:5678/webhook/chat';
+  const n8nOrigins = new Set<string>();
+
+  try {
+    const parsed = new URL(configuredN8nWebhook);
+    n8nOrigins.add(parsed.origin);
+    if (parsed.hostname === 'localhost') {
+      parsed.hostname = '127.0.0.1';
+      n8nOrigins.add(parsed.origin);
+    } else if (parsed.hostname === '127.0.0.1') {
+      parsed.hostname = 'localhost';
+      n8nOrigins.add(parsed.origin);
+    }
+  } catch {
+    checks.n8n = { status: 'error', details: 'Invalid Webhook URL' };
+  }
+
+  if (checks.n8n.status === 'unknown') {
+    let reachableOrigin = '';
+    for (const origin of n8nOrigins) {
+      if (await checkUrl(`${origin}/healthz`) || await checkUrl(`${origin}/rest/settings`)) {
+        reachableOrigin = origin;
+        break;
+      }
+    }
+
+    checks.n8n = reachableOrigin
+      ? { status: 'ok', details: `n8n reachable at ${reachableOrigin}` }
+      : { status: 'error', details: `n8n unreachable from ${configuredN8nWebhook}` };
   }
 
   // Global Status

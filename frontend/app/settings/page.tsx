@@ -4,6 +4,9 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { X, CheckCircle, AlertCircle } from 'lucide-react';
 
+const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434';
+const DEFAULT_N8N_WEBHOOK_URL = 'http://127.0.0.1:5678/webhook/chat';
+
 const dictionary: any = {
   en: { 
     title: 'Settings', back: 'Esc', save: 'Save Changes', saving: 'Saving...', saved: 'Settings Saved!',
@@ -30,11 +33,11 @@ const dictionary: any = {
 
 export default function Settings() {
   const [config, setConfig] = useState({
-    N8N_WEBHOOK_URL: '',
+    N8N_WEBHOOK_URL: DEFAULT_N8N_WEBHOOK_URL,
     VECTOR_DB_PROVIDER: 'chroma',
     LLM_PROVIDER: 'ollama',
     AGENT_LANGUAGE: 'en',
-    OLLAMA_BASE_URL: '',
+    OLLAMA_BASE_URL: DEFAULT_OLLAMA_BASE_URL,
     SUPABASE_URL: '',
     SUPABASE_KEY: '',
     OPENAI_API_KEY: '',
@@ -46,16 +49,31 @@ export default function Settings() {
   useEffect(() => {
     fetch('/api/settings')
       .then(res => res.json())
-      .then(data => setConfig(prev => ({ ...prev, ...data })));
+      .then(data => setConfig(prev => {
+        const merged = { ...prev, ...data };
+        if (!merged.OLLAMA_BASE_URL?.trim()) {
+          merged.OLLAMA_BASE_URL = DEFAULT_OLLAMA_BASE_URL;
+        }
+        if (!merged.N8N_WEBHOOK_URL?.trim()) {
+          merged.N8N_WEBHOOK_URL = DEFAULT_N8N_WEBHOOK_URL;
+        }
+        return merged;
+      }));
   }, []);
 
   const handleSave = async () => {
     setSaving(true);
+    const payload = {
+      ...config,
+      OLLAMA_BASE_URL: config.OLLAMA_BASE_URL.trim() || DEFAULT_OLLAMA_BASE_URL,
+      N8N_WEBHOOK_URL: config.N8N_WEBHOOK_URL.trim() || DEFAULT_N8N_WEBHOOK_URL,
+    };
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(config)
+      body: JSON.stringify(payload)
     });
+    setConfig(payload);
     setSaving(false);
     // instant feedback, no alert required for language, but maybe for server
     // alert(t.saved); 
@@ -165,7 +183,7 @@ export default function Settings() {
               type="text" 
               value={config.N8N_WEBHOOK_URL}
               onChange={(e) => setConfig({ ...config, N8N_WEBHOOK_URL: e.target.value })}
-              placeholder="http://localhost:5678/webhook/chat"
+              placeholder={DEFAULT_N8N_WEBHOOK_URL}
               className="w-full bg-[#09090b] border border-[#27272a] rounded-lg p-3 text-sm focus:border-gray-500 outline-none transition-colors placeholder-gray-600"
             />
             <p className="text-xs text-gray-500 mt-2">{t.dockerHint}</p>
