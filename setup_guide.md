@@ -35,6 +35,7 @@ LLM_PROVIDER=llamacpp
 AGENT_LANGUAGE=es
 AGENT_EXECUTION_MODE=confirm
 WEB_SEARCH_ENGINE=google
+MINIMIZE_TO_TRAY_ON_CLOSE=false
 WINDOW_CONTROLS_STYLE=windows
 WINDOW_CONTROLS_SIDE=right
 WINDOW_CONTROLS_ORDER=minimize,maximize,close
@@ -58,7 +59,7 @@ Notes:
 ## 4.1 Single installer build (.exe)
 
 ```powershell
-.\build_exe.bat
+.\3_build_exe.bat
 ```
 
 Expected output:
@@ -66,6 +67,7 @@ Expected output:
 - `UNLZ-Agent-Setup.exe` (direct copy at repo root)
 
 This installer uses offline WebView2 mode and deploys app + backend sidecar internally.
+It also shows a language selector (Spanish/English) and uses `icon.ico` as setup icon.
 
 ## 5. Key features to test
 

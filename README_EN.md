@@ -52,6 +52,7 @@ Technical docs:
   - style `windows` or `mac`
   - side `left/right`
   - button order (`minimize/maximize/close`)
+  - option to minimize to system tray on close (`MINIMIZE_TO_TRAY_ON_CLOSE`)
 - llama.cpp model selector:
   - dropdown of `.gguf` models detected in model directories and subdirectories
   - folder button to pick `LLAMACPP_MODELS_DIR` from a native browser dialog
@@ -100,7 +101,7 @@ This starts the desktop app and local backend.
 From repository root:
 
 ```powershell
-.\build_exe.bat
+.\3_build_exe.bat
 ```
 
 This generates a single installer at:
@@ -111,6 +112,8 @@ Installer behavior:
 - one file to distribute
 - installs app + backend sidecar automatically
 - uses offline WebView2 installation mode (no internet required during setup)
+- installer language selector enabled (Spanish/English)
+- installer icon explicitly set from `desktop/src-tauri/icons/icon.ico`
 
 ## Configuration
 
@@ -120,6 +123,7 @@ Config is stored in `.env` (editable from UI or file):
 - `AGENT_LANGUAGE=es|en|zh`
 - `AGENT_EXECUTION_MODE=confirm|autonomous`
 - `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
+- `MINIMIZE_TO_TRAY_ON_CLOSE=true|false`
 - `WINDOW_CONTROLS_STYLE=windows|mac`
 - `WINDOW_CONTROLS_SIDE=left|right`
 - `WINDOW_CONTROLS_ORDER=minimize,maximize,close` (or other permutation)

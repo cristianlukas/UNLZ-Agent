@@ -19,6 +19,7 @@ const DEFAULTS: Config = {
   AGENT_EXECUTION_MODE: "confirm",
   AGENT_COMMAND_TIMEOUT_SEC: "60",
   WEB_SEARCH_ENGINE: "google",
+  MINIMIZE_TO_TRAY_ON_CLOSE: "false",
   WINDOW_CONTROLS_STYLE: "windows",
   WINDOW_CONTROLS_SIDE: "right",
   WINDOW_CONTROLS_ORDER: "minimize,maximize,close",
@@ -296,6 +297,13 @@ export default function SettingsView() {
                 { value: "duckduckgo", label: "DuckDuckGo" },
                 { value: "auto", label: "Auto (Google + fallback)" },
               ]}
+            />
+          </Field>
+          <Field label="Cerrar a bandeja" hint="Si está activo, al cerrar la ventana se oculta en la bandeja del sistema en lugar de salir.">
+            <Toggle
+              value={(config.MINIMIZE_TO_TRAY_ON_CLOSE || "false") === "true"}
+              onChange={(v) => set("MINIMIZE_TO_TRAY_ON_CLOSE", v ? "true" : "false")}
+              label={(config.MINIMIZE_TO_TRAY_ON_CLOSE || "false") === "true" ? "activo" : "inactivo"}
             />
           </Field>
         </Section>

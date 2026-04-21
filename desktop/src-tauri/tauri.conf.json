@@ -31,11 +31,17 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": ["binaries/agent_server.exe"],
+    "resources": ["binaries/agent_server.exe", "icons/icon.ico"],
     "windows": {
       "webviewInstallMode": {
         "type": "offlineInstaller",
         "silent": true
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer-hooks.nsh",
+        "languages": ["Spanish", "English"],
+        "displayLanguageSelector": true
       }
     },
     "icon": [

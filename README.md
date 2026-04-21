@@ -52,6 +52,7 @@ Documentación técnica:
   - estilo `windows` o `mac`
   - lado `left/right`
   - orden de botones (`minimize/maximize/close`)
+  - opción para minimizar a bandeja al cerrar (`MINIMIZE_TO_TRAY_ON_CLOSE`)
 - Selector de modelos llama.cpp:
   - dropdown de `.gguf` detectados en carpeta de modelos y subdirectorios
   - botón de carpeta para elegir `LLAMACPP_MODELS_DIR` desde explorador
@@ -100,7 +101,7 @@ Esto levanta la app desktop y el backend local.
 Desde la raíz del repo:
 
 ```powershell
-.\build_exe.bat
+.\3_build_exe.bat
 ```
 
 Genera un instalador único en:
@@ -111,6 +112,8 @@ Características del instalador:
 - archivo único para distribuir
 - instala app + backend sidecar automáticamente
 - incluye instalación offline de WebView2 (no requiere descarga durante setup)
+- selector de idioma en instalador (Español/English)
+- ícono de instalador definido desde `desktop/src-tauri/icons/icon.ico`
 
 ## Configuración
 
@@ -120,6 +123,7 @@ La configuración vive en `.env` (editable desde UI o archivo):
 - `AGENT_LANGUAGE=es|en|zh`
 - `AGENT_EXECUTION_MODE=confirm|autonomous`
 - `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
+- `MINIMIZE_TO_TRAY_ON_CLOSE=true|false`
 - `WINDOW_CONTROLS_STYLE=windows|mac`
 - `WINDOW_CONTROLS_SIDE=left|right`
 - `WINDOW_CONTROLS_ORDER=minimize,maximize,close` (u otra permutación)

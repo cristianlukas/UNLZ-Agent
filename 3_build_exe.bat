@@ -13,15 +13,10 @@ if not exist "%PYTHON%" (
   exit /b 1
 )
 
-where npm >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] npm not found in PATH.
-  exit /b 1
-)
-
 set "DESKTOP=%ROOT%desktop"
 set "BIN_DIR=%DESKTOP%\src-tauri\binaries"
 set "OUT_DIR=%ROOT%dist-single-exe"
+set "ROOT_SETUP=%ROOT%UNLZ-Agent-Setup.exe"
 set "AGENT_SCRIPT=%ROOT%agent_server.py"
 set "AGENT_EXE=%BIN_DIR%\agent_server.exe"
 
@@ -53,13 +48,6 @@ if not exist "%AGENT_EXE%" (
 
 pushd "%DESKTOP%"
 echo ==> Building Tauri NSIS installer
-call npm run build
-if errorlevel 1 (
-  popd
-  echo [ERROR] Frontend build failed.
-  exit /b 1
-)
-
 call npx tauri build --bundles nsis
 if errorlevel 1 (
   popd
@@ -80,12 +68,14 @@ exit /b 1
 if exist "%OUT_DIR%" rmdir /s /q "%OUT_DIR%"
 mkdir "%OUT_DIR%"
 copy /y "!INSTALLER!" "%OUT_DIR%\UNLZ-Agent-Setup.exe" >nul
+copy /y "!INSTALLER!" "%ROOT_SETUP%" >nul
 
 echo.
 echo Build complete.
-echo Single installer EXE:
+echo Installer copies:
 echo   %OUT_DIR%\UNLZ-Agent-Setup.exe
+echo   %ROOT_SETUP%
 echo.
-echo Users only need this one EXE.
+echo Users only need this one EXE installer.
 exit /b 0
 
