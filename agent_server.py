@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import http.client
+import hashlib
 import json
 import os
 import re
 import sys
 import tempfile
+import time
+import uuid
 import zipfile
 from datetime import datetime
 from urllib.parse import urlparse
@@ -33,7 +36,7 @@ if _FORCE_LOG_FILE or not _is_tty:
     sys.stderr = _log_fh
 import subprocess
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import uvicorn
 from dotenv import load_dotenv
@@ -316,13 +319,16 @@ def _tools_for_message(text: str) -> list[dict]:
 def _web_search(query: str, max_results: int = 4) -> str:
     q = (query or "").strip()
     if not q:
-        return "No web results found."
+        return "Missing query."
 
     n = max(1, min(int(max_results or 4), 8))
     engine = (os.getenv("WEB_SEARCH_ENGINE", Config.WEB_SEARCH_ENGINE) or "google").lower()
     errors: list[str] = []
+    provider_latency_ms: dict[str, int] = {}
+    collected: list[dict] = []
 
     def search_google() -> list[dict]:
+        start = time.perf_counter()
         # Optional dependency: googlesearch-python
         from googlesearch import search  # type: ignore
         items = []
@@ -330,38 +336,329 @@ def _web_search(query: str, max_results: int = 4) -> str:
             if idx >= n:
                 break
             items.append({"title": "Google result", "body": "", "href": url})
+        provider_latency_ms["google"] = int((time.perf_counter() - start) * 1000)
         return items
 
     def search_duckduckgo() -> list[dict]:
+        start = time.perf_counter()
         # Prefer the renamed package when available, keep backward compatibility.
         try:
             from ddgs import DDGS  # type: ignore
         except Exception:
             from duckduckgo_search import DDGS  # type: ignore
-        return list(DDGS().text(q, max_results=n) or [])
+        items = list(DDGS().text(q, max_results=n) or [])
+        provider_latency_ms["duckduckgo"] = int((time.perf_counter() - start) * 1000)
+        return items
+
+    def search_serpapi() -> list[dict]:
+        start = time.perf_counter()
+        key = (os.getenv("SERPAPI_API_KEY") or "").strip()
+        if not key:
+            raise RuntimeError("SERPAPI_API_KEY missing")
+        endpoint = f"https://serpapi.com/search.json?engine=google&q={q}&api_key={key}&num={n}"
+        req = Request(endpoint, headers={"User-Agent": "unlz-agent"})
+        with urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = []
+        for item in (data.get("organic_results") or [])[:n]:
+            out.append({
+                "title": item.get("title") or "SerpAPI result",
+                "body": item.get("snippet") or "",
+                "href": item.get("link") or "",
+            })
+        provider_latency_ms["serpapi"] = int((time.perf_counter() - start) * 1000)
+        return out
+
+    def search_bing_api() -> list[dict]:
+        start = time.perf_counter()
+        key = (os.getenv("BING_API_KEY") or "").strip()
+        endpoint = (os.getenv("BING_API_ENDPOINT") or "https://api.bing.microsoft.com/v7.0/search").strip()
+        if not key:
+            raise RuntimeError("BING_API_KEY missing")
+        req = Request(
+            f"{endpoint}?q={q}&count={n}",
+            headers={"Ocp-Apim-Subscription-Key": key, "User-Agent": "unlz-agent"},
+        )
+        with urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        out = []
+        for item in (data.get("webPages", {}).get("value") or [])[:n]:
+            out.append({
+                "title": item.get("name") or "Bing result",
+                "body": item.get("snippet") or "",
+                "href": item.get("url") or "",
+            })
+        provider_latency_ms["bing"] = int((time.perf_counter() - start) * 1000)
+        return out
 
     strategies = []
     if engine == "google":
-        strategies = [("google", search_google), ("duckduckgo", search_duckduckgo)]
+        strategies = [("google", search_google), ("duckduckgo", search_duckduckgo), ("serpapi", search_serpapi), ("bing", search_bing_api)]
     elif engine == "duckduckgo":
-        strategies = [("duckduckgo", search_duckduckgo), ("google", search_google)]
+        strategies = [("duckduckgo", search_duckduckgo), ("google", search_google), ("serpapi", search_serpapi), ("bing", search_bing_api)]
+    elif engine == "serpapi":
+        strategies = [("serpapi", search_serpapi), ("google", search_google), ("duckduckgo", search_duckduckgo)]
+    elif engine == "bing":
+        strategies = [("bing", search_bing_api), ("google", search_google), ("duckduckgo", search_duckduckgo)]
+    elif engine in ("fusion", "auto"):
+        strategies = [("google", search_google), ("duckduckgo", search_duckduckgo), ("serpapi", search_serpapi), ("bing", search_bing_api)]
     else:
         strategies = [("google", search_google), ("duckduckgo", search_duckduckgo)]
 
     for name, fn in strategies:
         try:
             results = fn()
+            _record_web_provider(name, ok=True, latency_ms=provider_latency_ms.get(name, 0))
             if results:
-                return "\n\n".join(
-                    f"**{r.get('title', 'Result')}**\n{r.get('body', '')}\n{r.get('href', '')}"
-                    for r in results[:n]
-                )
+                for r in results[:n]:
+                    collected.append({
+                        "provider": name,
+                        "title": r.get("title", "Result"),
+                        "body": r.get("body", ""),
+                        "href": r.get("href", ""),
+                    })
+                if engine not in ("fusion", "auto"):
+                    break
         except Exception as e:
+            _record_web_provider(name, ok=False, err=str(e))
             errors.append(f"{name}: {e}")
+
+    if collected:
+        merged: list[dict] = []
+        seen: set[str] = set()
+        for r in collected:
+            href = (r.get("href") or "").strip()
+            if not href or href in seen:
+                continue
+            seen.add(href)
+            merged.append(r)
+            if len(merged) >= n:
+                break
+        lines = []
+        for r in merged:
+            lines.append(
+                f"**{r.get('title', 'Result')}**\n{r.get('body', '')}\n{r.get('href', '')}\nFuente: {r.get('provider')}"
+            )
+        if provider_latency_ms:
+            lines.append(
+                "\n---\nSearch providers latency (ms): "
+                + ", ".join(f"{k}={v}" for k, v in provider_latency_ms.items())
+            )
+        return "\n\n".join(lines)
 
     if errors:
         return f"WEB_SEARCH_UNAVAILABLE: No web results found. ({'; '.join(errors[:2])})"
     return "WEB_SEARCH_UNAVAILABLE: No web results found."
+
+
+def _agent_limits() -> dict:
+    return {
+        "max_iterations": max(1, min(int(os.getenv("AGENT_MAX_ITERATIONS", "8")), 20)),
+        "max_tool_calls": max(1, min(int(os.getenv("AGENT_MAX_TOOL_CALLS", "20")), 100)),
+        "max_wall_sec": max(5, min(int(os.getenv("AGENT_MAX_WALL_TIME_SEC", "180")), 1800)),
+        "tool_timeout_sec": max(1, min(int(os.getenv("AGENT_TOOL_TIMEOUT_SEC", "45")), 300)),
+    }
+
+
+def _runs_dir() -> Path:
+    p = Path(Config.DATA_DIR) / "runs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _snapshots_dir() -> Path:
+    p = Path(Config.DATA_DIR) / "snapshots"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _trace_path(run_id: str) -> Path:
+    return _runs_dir() / f"{run_id}.json"
+
+
+def _persist_trace(run_id: str, trace: dict) -> None:
+    _trace_path(run_id).write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _snapshot_path(conversation_id: str) -> Path:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", (conversation_id or "").strip())[:80] or "default"
+    return _snapshots_dir() / f"{safe}.json"
+
+
+def _save_snapshot(conversation_id: str, payload: dict) -> None:
+    if not (conversation_id or "").strip():
+        return
+    data = {
+        "conversation_id": conversation_id,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        **payload,
+    }
+    _snapshot_path(conversation_id).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_snapshot(conversation_id: str) -> dict:
+    p = _snapshot_path(conversation_id)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _list_snapshots() -> list[dict]:
+    out: list[dict] = []
+    for p in sorted(_snapshots_dir().glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+            out.append({
+                "conversation_id": rec.get("conversation_id") or p.stem,
+                "saved_at": rec.get("saved_at") or "",
+                "objective": rec.get("objective") or "",
+                "stage_count": len(rec.get("stages") or []),
+                "file": str(p),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _memory_path() -> Path:
+    p = Path(Config.DATA_DIR) / "memory.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _append_memory(conv_id: str, folder_id: str, role: str, content: str) -> None:
+    if not content.strip():
+        return
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "conversation_id": conv_id,
+        "folder_id": folder_id,
+        "role": role,
+        "content": content[:4000],
+    }
+    with _memory_path().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _memory_decay_score(ts_iso: str) -> float:
+    try:
+        dt = datetime.fromisoformat(ts_iso)
+        hours = max(0.0, (datetime.now() - dt).total_seconds() / 3600.0)
+        return 1.0 / (1.0 + (hours / 24.0))
+    except Exception:
+        return 0.1
+
+
+def _retrieve_memory(query: str, conv_id: str, folder_id: str, top_k: int = 5) -> list[str]:
+    p = _memory_path()
+    if not p.exists():
+        return []
+    q_terms = [t for t in re.split(r"\s+", (query or "").lower().strip()) if len(t) >= 3][:12]
+    if not q_terms:
+        return []
+    rows: list[tuple[float, str]] = []
+    try:
+        for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines()[-1000:]:
+            if not raw.strip():
+                continue
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            txt = str(rec.get("content") or "")
+            low = txt.lower()
+            hits = sum(low.count(t) for t in q_terms)
+            if hits <= 0:
+                continue
+            score = float(hits)
+            if conv_id and str(rec.get("conversation_id") or "") == conv_id:
+                score += 4.0
+            if folder_id and str(rec.get("folder_id") or "") == folder_id:
+                score += 2.0
+            score *= _memory_decay_score(str(rec.get("ts") or ""))
+            rows.append((score, txt))
+    except Exception:
+        return []
+    rows.sort(key=lambda x: x[0], reverse=True)
+    out: list[str] = []
+    for _, t in rows[:max(1, min(top_k, 10))]:
+        if t not in out:
+            out.append(t[:500])
+    return out
+
+
+_CONNECTOR_METRICS: dict[str, Any] = {
+    "web_search": {"providers": {}},
+    "tools": {},
+}
+
+
+def _telemetry_enabled() -> bool:
+    raw = (os.getenv("AGENT_TELEMETRY_OPT_IN", "false") or "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _telemetry_path() -> Path:
+    p = Path(Config.DATA_DIR) / "telemetry.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _emit_telemetry(event: str, payload: dict) -> None:
+    if not _telemetry_enabled():
+        return
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "event": event,
+        **(payload or {}),
+    }
+    with _telemetry_path().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _record_web_provider(provider: str, ok: bool, latency_ms: int = 0, err: str = "") -> None:
+    p = (_CONNECTOR_METRICS.setdefault("web_search", {}).setdefault("providers", {}).setdefault(provider, {
+        "calls": 0,
+        "ok": 0,
+        "error": 0,
+        "avg_latency_ms": 0.0,
+        "last_error": "",
+        "last_seen": "",
+    }))
+    p["calls"] += 1
+    p["ok"] += 1 if ok else 0
+    p["error"] += 0 if ok else 1
+    if latency_ms > 0:
+        prev_calls = max(1, int(p["calls"]))
+        prev_avg = float(p["avg_latency_ms"])
+        p["avg_latency_ms"] = round(((prev_avg * (prev_calls - 1)) + latency_ms) / prev_calls, 2)
+    if err and not ok:
+        p["last_error"] = err[:400]
+    p["last_seen"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _record_tool_metric(tool_name: str, ok: bool, latency_ms: int = 0, err: str = "") -> None:
+    t = _CONNECTOR_METRICS.setdefault("tools", {}).setdefault(tool_name, {
+        "calls": 0,
+        "ok": 0,
+        "error": 0,
+        "avg_latency_ms": 0.0,
+        "last_error": "",
+        "last_seen": "",
+    })
+    t["calls"] += 1
+    t["ok"] += 1 if ok else 0
+    t["error"] += 0 if ok else 1
+    if latency_ms > 0:
+        prev_calls = max(1, int(t["calls"]))
+        prev_avg = float(t["avg_latency_ms"])
+        t["avg_latency_ms"] = round(((prev_avg * (prev_calls - 1)) + latency_ms) / prev_calls, 2)
+    if err and not ok:
+        t["last_error"] = err[:400]
+    t["last_seen"] = datetime.now().isoformat(timespec="seconds")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Request models
@@ -373,6 +670,8 @@ class ChatRequest(BaseModel):
     system_prompt: str = ""         # override default system prompt (from Behavior)
     folder_id: str = ""             # optional folder scope for folder-only docs
     mode: str = "normal"            # normal | plan | iterate
+    conversation_id: str = ""
+    dry_run: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,8 +772,51 @@ TOOLS = [
                     "command": {"type": "string", "description": "PowerShell command to execute"},
                     "cwd": {"type": "string", "description": "Optional working directory"},
                     "timeout_sec": {"type": "integer", "description": "Optional timeout in seconds"},
+                    "idempotency_key": {"type": "string", "description": "Optional idempotency key for mutating actions"},
+                    "dry_run": {"type": "boolean", "description": "When true, returns planned action without executing"},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_file_exists",
+            "description": "Verify that a file or directory exists on disk.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_file_contains",
+            "description": "Verify that a file contains specific text.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["path", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_command_output",
+            "description": "Run a read-only command and verify output contains expected text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "contains": {"type": "string"},
+                    "cwd": {"type": "string"},
+                    "timeout_sec": {"type": "integer"},
+                },
+                "required": ["command", "contains"],
             },
         },
     },
@@ -493,6 +835,86 @@ _HIGH_RISK_PATTERNS = [
     r"\bstop-computer\b",
     r"\brestart-computer\b",
 ]
+
+_TOOL_RESULTS_BY_IDEMPOTENCY: dict[str, str] = {}
+
+_TOOL_CONTRACTS = {
+    "search_local_knowledge": {
+        "operation_class": "knowledge",
+        "mutating": False,
+        "required": {"query": str},
+        "retry_hint": "Refine query terms.",
+    },
+    "web_search": {
+        "operation_class": "network",
+        "mutating": False,
+        "required": {"query": str},
+        "retry_hint": "Try another provider or a narrower query.",
+    },
+    "run_windows_command": {
+        "operation_class": "system",
+        "mutating": True,
+        "required": {"command": str},
+        "retry_hint": "Check permissions, cwd and command syntax.",
+    },
+    "verify_file_exists": {
+        "operation_class": "filesystem",
+        "mutating": False,
+        "required": {"path": str},
+        "retry_hint": "Ensure path is absolute and accessible.",
+    },
+    "verify_file_contains": {
+        "operation_class": "filesystem",
+        "mutating": False,
+        "required": {"path": str, "text": str},
+        "retry_hint": "Verify file encoding and exact substring.",
+    },
+    "verify_command_output": {
+        "operation_class": "process",
+        "mutating": False,
+        "required": {"command": str, "contains": str},
+        "retry_hint": "Use simpler command output and exact expected token.",
+    },
+}
+
+
+def _tool_contract_error(name: str, args: dict) -> str | None:
+    contract = _TOOL_CONTRACTS.get(name)
+    if not contract:
+        return None
+    req = contract.get("required", {})
+    for k, typ in req.items():
+        if k not in args:
+            return f"Tool contract error: missing '{k}'"
+        if not isinstance(args.get(k), typ):
+            return f"Tool contract error: '{k}' must be {typ.__name__}"
+    return None
+
+
+def _operation_class_for_command(command: str) -> str:
+    c = (command or "").lower()
+    if any(x in c for x in ["new-item", "remove-item", "copy-item", "move-item", "mkdir", "del ", "ren ", "set-content", "add-content"]):
+        return "filesystem"
+    if any(x in c for x in ["invoke-webrequest", "curl ", "wget ", "http://", "https://"]):
+        return "network"
+    if any(x in c for x in ["start-process", "stop-process", "taskkill", "get-process"]):
+        return "process"
+    return "system"
+
+
+def _policy_decision(operation_class: str, mutating: bool) -> tuple[str, str]:
+    default = "confirm" if mutating else "allow"
+    env_key = f"AGENT_POLICY_{operation_class.upper()}"
+    raw = (os.getenv(env_key, default) or default).strip().lower()
+    if raw not in ("allow", "confirm", "deny"):
+        raw = default
+    if raw == "allow" and mutating and _execution_mode() == "confirm":
+        return "confirm", "Global execution mode is confirm."
+    if raw == "deny":
+        return "deny", f"Denied by policy {env_key}=deny"
+    if raw == "confirm":
+        return "confirm", f"Requires confirmation by policy {env_key}=confirm"
+    return "allow", "Allowed"
 
 
 def _execution_mode() -> str:
@@ -513,18 +935,6 @@ def _run_windows_command(args: dict) -> str:
                 "command": command,
             }, ensure_ascii=False)
 
-    mode = _execution_mode()
-    if mode == "confirm":
-        return json.dumps({
-            "status": "needs_confirmation",
-            "mode": mode,
-            "command": command,
-            "message": (
-                "Execution mode is 'confirm'. Ask the user to switch to 'autonomous' in Settings "
-                "if they want commands to run automatically."
-            ),
-        }, ensure_ascii=False)
-
     cwd = str(args.get("cwd") or "").strip()
     if cwd:
         run_cwd = os.path.abspath(os.path.expanduser(cwd))
@@ -541,6 +951,53 @@ def _run_windows_command(args: dict) -> str:
     timeout_sec = max(1, min(timeout_sec, 300))
 
     max_output = max(500, int(os.getenv("AGENT_COMMAND_MAX_OUTPUT", str(Config.AGENT_COMMAND_MAX_OUTPUT))))
+    op_class = _operation_class_for_command(command)
+    mutating = op_class in ("filesystem", "process", "system")
+
+    idem_key = str(args.get("idempotency_key") or "").strip()
+    if not idem_key:
+        idem_seed = f"{command}|{run_cwd}|{timeout_sec}"
+        idem_key = hashlib.sha256(idem_seed.encode("utf-8")).hexdigest()[:20]
+    if idem_key in _TOOL_RESULTS_BY_IDEMPOTENCY:
+        return _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key]
+
+    dry_run = bool(args.get("dry_run", False))
+    if dry_run:
+        result = json.dumps({
+            "status": "dry_run",
+            "operation_class": op_class,
+            "command": command,
+            "cwd": run_cwd,
+            "idempotency_key": idem_key,
+            "would_execute": True,
+        }, ensure_ascii=False)
+        _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key] = result
+        return result
+
+    decision, reason = _policy_decision(op_class, mutating)
+    if decision == "deny":
+        return json.dumps({
+            "status": "blocked_policy",
+            "operation_class": op_class,
+            "command": command,
+            "idempotency_key": idem_key,
+            "reason": reason,
+            "retry_hint": "Request another operation or update policy settings.",
+        }, ensure_ascii=False)
+
+    mode = _execution_mode()
+    if mode == "confirm" or decision == "confirm":
+        return json.dumps({
+            "status": "needs_confirmation",
+            "mode": mode,
+            "operation_class": op_class,
+            "command": command,
+            "idempotency_key": idem_key,
+            "message": (
+                "Execution requires confirmation. Switch to autonomous mode "
+                "or update AGENT_POLICY_* for this operation class."
+            ),
+        }, ensure_ascii=False)
 
     try:
         completed = subprocess.run(
@@ -556,24 +1013,38 @@ def _run_windows_command(args: dict) -> str:
             out = out[:max_output] + "\n...[truncated]"
         if len(err) > max_output:
             err = err[:max_output] + "\n...[truncated]"
-        return json.dumps({
+        result = json.dumps({
             "status": "executed",
             "mode": mode,
+            "operation_class": op_class,
             "command": command,
             "cwd": run_cwd,
+            "idempotency_key": idem_key,
             "returncode": completed.returncode,
             "stdout": out,
             "stderr": err,
         }, ensure_ascii=False)
+        _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key] = result
+        return result
     except subprocess.TimeoutExpired:
-        return json.dumps({
+        result = json.dumps({
             "status": "timeout",
             "command": command,
             "cwd": run_cwd,
+            "idempotency_key": idem_key,
             "timeout_sec": timeout_sec,
+            "retry_hint": "Use a shorter command or increase timeout_sec.",
         }, ensure_ascii=False)
+        _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key] = result
+        return result
     except Exception as e:
-        return json.dumps({"status": "error", "error": str(e), "command": command}, ensure_ascii=False)
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "command": command,
+            "idempotency_key": idem_key,
+            "retry_hint": "Validate command syntax and working directory.",
+        }, ensure_ascii=False)
 
 
 def _summarize_windows_command_result(result_text: str) -> str:
@@ -600,6 +1071,10 @@ def _summarize_windows_command_result(result_text: str) -> str:
         return f"El comando superó el tiempo límite.\n\nComando: `{command}`"
     if status == "blocked":
         return "El comando fue bloqueado por política de seguridad."
+    if status == "blocked_policy":
+        return f"El comando fue bloqueado por política.\n\nRazón: {data.get('reason', 'policy deny')}."
+    if status == "dry_run":
+        return f"Modo dry-run: no ejecuté el comando.\n\nComando: `{command}`"
     if status == "error":
         return f"No pude ejecutar el comando: {data.get('error', 'error desconocido')}."
     return "Comando procesado."
@@ -700,29 +1175,99 @@ def _search_folder_documents(folder_id: str, query: str, max_results: int = 4) -
     return "\n\n".join(item for _, item in ranked[:n])
 
 
-def execute_tool(name: str, args: dict, folder_id: str = "") -> str:
+def _verify_file_exists(path: str) -> str:
+    p = Path(os.path.expanduser(path or "")).resolve()
+    return json.dumps({
+        "passed": p.exists(),
+        "path": str(p),
+        "is_file": p.is_file(),
+        "is_dir": p.is_dir(),
+    }, ensure_ascii=False)
+
+
+def _verify_file_contains(path: str, text: str) -> str:
+    p = Path(os.path.expanduser(path or "")).resolve()
+    if not p.exists() or not p.is_file():
+        return json.dumps({"passed": False, "path": str(p), "reason": "file_not_found"}, ensure_ascii=False)
     try:
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        return json.dumps({"passed": False, "path": str(p), "reason": f"read_error:{e}"}, ensure_ascii=False)
+    needle = str(text or "")
+    return json.dumps({
+        "passed": needle in content,
+        "path": str(p),
+        "contains": needle,
+    }, ensure_ascii=False)
+
+
+def _verify_command_output(command: str, contains: str, cwd: str = "", timeout_sec: int = 20) -> str:
+    payload = _run_windows_command({
+        "command": command,
+        "cwd": cwd,
+        "timeout_sec": timeout_sec,
+        "dry_run": False,
+        "idempotency_key": f"verify::{hashlib.sha1((command+'|'+cwd).encode('utf-8')).hexdigest()[:20]}",
+    })
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return json.dumps({"passed": False, "reason": "invalid_command_result"}, ensure_ascii=False)
+    out = str(data.get("stdout") or "")
+    err = str(data.get("stderr") or "")
+    txt = f"{out}\n{err}"
+    needle = str(contains or "")
+    return json.dumps({
+        "passed": needle in txt and data.get("status") == "executed" and int(data.get("returncode", 1)) == 0,
+        "status": data.get("status"),
+        "returncode": data.get("returncode"),
+        "contains": needle,
+    }, ensure_ascii=False)
+
+
+def execute_tool(name: str, args: dict, folder_id: str = "", dry_run: bool = False) -> str:
+    started = time.perf_counter()
+    ok = False
+    last_err = ""
+    try:
+        if not isinstance(args, dict):
+            last_err = "invalid args shape"
+            return f"Tool error ({name}): invalid args shape"
+        c_err = _tool_contract_error(name, args)
+        if c_err:
+            hint = (_TOOL_CONTRACTS.get(name) or {}).get("retry_hint", "")
+            last_err = c_err
+            return f"{c_err}. RETRY_HINT: {hint}"
+
         if name == "search_local_knowledge":
             from rag_pipeline.retriever import search_documents
             results = search_documents(args.get("query", ""))
             if not results:
+                ok = True
                 return "No relevant documents found in the knowledge base."
+            ok = True
             return "\n\n".join(
                 f"[Document {i + 1}]:\n{r.get('page_content') or r.get('content') or json.dumps(r)}"
                 for i, r in enumerate(results[:4])
             )
 
         elif name == "web_search":
-            return _web_search(args.get("query", ""), args.get("max_results", 4))
+            out = _web_search(args.get("query", ""), args.get("max_results", 4))
+            ok = not str(out).startswith("WEB_SEARCH_UNAVAILABLE")
+            if not ok:
+                last_err = "unavailable"
+            return out
 
         elif name == "get_current_time":
             from datetime import datetime
+            ok = True
             return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         elif name == "get_system_stats":
             import psutil
             mem = psutil.virtual_memory()
             vram = _collect_vram_stats()
+            ok = True
             return json.dumps({
                 "cpu_percent": psutil.cpu_percent(interval=0.1),
                 "ram_total_gb": round(mem.total / 1024 ** 3, 2),
@@ -737,25 +1282,80 @@ def execute_tool(name: str, args: dict, folder_id: str = "") -> str:
         elif name == "list_knowledge_base_files":
             data_dir = Path(Config.DATA_DIR)
             if not data_dir.exists():
+                ok = True
                 return "Knowledge base is empty."
             files = [f.name for f in data_dir.iterdir() if f.is_file()]
+            ok = True
             return json.dumps(files) if files else "No files in knowledge base."
 
         elif name == "search_folder_documents":
-            return _search_folder_documents(
+            out = _search_folder_documents(
                 folder_id=folder_id,
                 query=args.get("query", ""),
                 max_results=args.get("max_results", 4),
             )
+            ok = True
+            return out
 
         elif name == "run_windows_command":
-            return _run_windows_command(args)
+            payload = dict(args)
+            if dry_run and "dry_run" not in payload:
+                payload["dry_run"] = True
+            out = _run_windows_command(payload)
+            try:
+                p = json.loads(out)
+                st = str(p.get("status") or "")
+                ok = st in ("executed", "dry_run")
+                if not ok:
+                    last_err = st or "failed"
+            except Exception:
+                ok = False
+                last_err = "invalid_json_result"
+            return out
+
+        elif name == "verify_file_exists":
+            out = _verify_file_exists(str(args.get("path", "")))
+            try:
+                ok = bool(json.loads(out).get("passed"))
+            except Exception:
+                ok = False
+                last_err = "invalid_json_result"
+            return out
+
+        elif name == "verify_file_contains":
+            out = _verify_file_contains(str(args.get("path", "")), str(args.get("text", "")))
+            try:
+                ok = bool(json.loads(out).get("passed"))
+            except Exception:
+                ok = False
+                last_err = "invalid_json_result"
+            return out
+
+        elif name == "verify_command_output":
+            out = _verify_command_output(
+                command=str(args.get("command", "")),
+                contains=str(args.get("contains", "")),
+                cwd=str(args.get("cwd", "")),
+                timeout_sec=int(args.get("timeout_sec", 20) or 20),
+            )
+            try:
+                ok = bool(json.loads(out).get("passed"))
+            except Exception:
+                ok = False
+                last_err = "invalid_json_result"
+            return out
 
         else:
+            last_err = "unknown_tool"
             return f"Unknown tool: {name}"
 
     except Exception as e:
-        return f"Tool error ({name}): {e}"
+        hint = (_TOOL_CONTRACTS.get(name) or {}).get("retry_hint", "Check parameters and try again.")
+        last_err = str(e)
+        return f"Tool error ({name}): {e}. RETRY_HINT: {hint}"
+    finally:
+        latency = int((time.perf_counter() - started) * 1000)
+        _record_tool_metric(name, ok=ok, latency_ms=latency, err=last_err)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -833,18 +1433,67 @@ def _compose_system_prompt(system_prompt: str = "") -> str:
     return base_prompt
 
 
+def _extract_urls(text: str, limit: int = 8) -> list[str]:
+    urls: list[str] = []
+    for u in re.findall(r"https?://[^\s)>\]\"']+", text or ""):
+        if u not in urls:
+            urls.append(u)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def _tool_result_failed(tool_name: str, result: str) -> bool:
+    t = result or ""
+    if tool_name == "web_search":
+        return t.startswith("WEB_SEARCH_UNAVAILABLE")
+    if tool_name == "run_windows_command":
+        try:
+            data = json.loads(t)
+            return str(data.get("status") or "") not in ("executed", "dry_run")
+        except Exception:
+            return True
+    return "Tool error" in t
+
+
+def _confidence_from_context(
+    tool_calls: int,
+    had_errors: bool,
+    research_request: bool,
+    answer_text: str,
+    web_result_text: str,
+) -> float:
+    score = 0.65
+    if tool_calls > 0:
+        score += min(0.2, tool_calls * 0.03)
+    if had_errors:
+        score -= 0.22
+    if research_request:
+        urls_in_answer = _extract_urls(answer_text)
+        urls_in_web = _extract_urls(web_result_text)
+        if urls_in_answer:
+            score += 0.1
+        elif urls_in_web:
+            score += 0.03
+        else:
+            score -= 0.15
+    return max(0.05, min(0.99, round(score, 2)))
+
+
 async def _agent_stream_normal(
     message: str,
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    conversation_id: str = "",
+    dry_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Multi-step tool-calling agent. Yields SSE data lines.
-    Event types: step | chunk | error | done
+    Event types: step | chunk | error | confidence | done
     """
-    # Safety check
     from guardrails.validator import validate_input
+
     safety = validate_input(message)
     if not safety.get("valid", True):
         err = safety.get("error", "Query rejected by safety filter.")
@@ -852,37 +1501,58 @@ async def _agent_stream_normal(
         return
 
     client, model = _get_client()
-
-    system_prompt = _compose_system_prompt(system_prompt)
-
-    messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    for h in history[-12:]:   # keep last 12 turns to avoid blowing context
-        if h.get("role") in ("user", "assistant") and h.get("content"):
-            messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": message})
-
-    loop = asyncio.get_event_loop()
+    limits = _agent_limits()
+    started_at = time.time()
+    tool_calls = 0
+    had_tool_errors = False
+    final_chunks: list[str] = []
     last_tool_name: str | None = None
     last_tool_result: str | None = None
     force_tools = _is_research_request(message) or _is_action_request(message)
+    is_research = _is_research_request(message)
+
+    prompt_text = _compose_system_prompt(system_prompt)
+    messages: list[dict] = [{"role": "system", "content": prompt_text}]
+    for h in history[-12:]:
+        if h.get("role") in ("user", "assistant") and h.get("content"):
+            messages.append({"role": h["role"], "content": h["content"]})
+
+    mem_lines = _retrieve_memory(message, conversation_id, _safe_folder_id(folder_id), top_k=5)
+    if mem_lines:
+        messages.append({
+            "role": "system",
+            "content": "Memoria relevante previa:\n" + "\n".join(f"- {m}" for m in mem_lines),
+        })
+    if is_research:
+        messages.append({
+            "role": "system",
+            "content": (
+                "Research mode: use web/local tools first, provide URLs, and mark confidence as low when evidence is insufficient."
+            ),
+        })
+    messages.append({"role": "user", "content": message})
+
     available_tools = _tools_for_message(message)
     if _safe_folder_id(folder_id):
-        # Folder-scoped conversations should use only folder documents for KB queries.
         available_tools = [
             t for t in available_tools
             if t.get("function", {}).get("name") != "search_local_knowledge"
         ]
-    emitted_final = False
-    invalid_shape_count = 0
 
-    for iteration in range(6):  # max 6 tool-call rounds
+    loop = asyncio.get_event_loop()
+    invalid_shape_count = 0
+    emitted_final = False
+
+    for iteration in range(limits["max_iterations"]):
+        if (time.time() - started_at) >= limits["max_wall_sec"]:
+            yield f"data: {json.dumps({'type': 'error', 'text': 'Agent wall-time limit reached before completion.'})}\n\n"
+            break
+
         try:
             resp = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 tools=available_tools,
-                # Force at least one tool call for research-like prompts, then
-                # allow the model to produce a final answer in later rounds.
                 tool_choice="required" if (force_tools and iteration == 0) else "auto",
                 stream=False,
                 timeout=90,
@@ -891,11 +1561,7 @@ async def _agent_stream_normal(
             yield f"data: {json.dumps({'type': 'error', 'text': f'LLM error: {e}'})}\n\n"
             return
 
-        try:
-            choices = getattr(resp, "choices", None)
-        except BaseException:
-            choices = None
-
+        choices = getattr(resp, "choices", None)
         if choices is None:
             invalid_shape_count += 1
             if invalid_shape_count <= 2:
@@ -906,23 +1572,16 @@ async def _agent_stream_normal(
                 preview = preview[:240] + "..."
             yield f"data: {json.dumps({'type': 'error', 'text': f'LLM invalid response shape: {type(resp).__name__} {preview}'})}\n\n"
             return
-
         if not choices:
             yield f"data: {json.dumps({'type': 'error', 'text': 'LLM returned empty choices'})}\n\n"
             return
 
-        try:
-            choice = choices[0]
-            msg = getattr(choice, "message", None)
-            finish_reason = getattr(choice, "finish_reason", None)
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM choices parsing error: {e}'})}\n\n"
-            return
-
-        # ── Tool calls ──────────────────────────────────────────────────────
+        choice = choices[0]
+        msg = getattr(choice, "message", None)
+        finish_reason = getattr(choice, "finish_reason", None)
         msg_tool_calls = getattr(msg, "tool_calls", None) if msg else None
+
         if finish_reason == "tool_calls" and msg_tool_calls:
-            # Append assistant turn with tool_calls
             messages.append({
                 "role": "assistant",
                 "content": (getattr(msg, "content", "") or ""),
@@ -930,16 +1589,18 @@ async def _agent_stream_normal(
                     {
                         "id": tc.id,
                         "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
                     }
                     for tc in msg_tool_calls
                 ],
             })
 
+            hard_stop = False
             for tc in msg_tool_calls:
+                if tool_calls >= limits["max_tool_calls"]:
+                    yield f"data: {json.dumps({'type': 'error', 'text': 'Agent tool-call limit reached.'})}\n\n"
+                    hard_stop = True
+                    break
                 fn = tc.function.name
                 try:
                     fn_args = json.loads(tc.function.arguments or "{}")
@@ -948,38 +1609,42 @@ async def _agent_stream_normal(
 
                 yield f"data: {json.dumps({'type': 'step', 'text': fn, 'args': fn_args})}\n\n"
                 await asyncio.sleep(0)
+                try:
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, execute_tool, fn, fn_args, folder_id, dry_run),
+                        timeout=float(limits["tool_timeout_sec"]),
+                    )
+                except asyncio.TimeoutError:
+                    result = f"Tool error ({fn}): timeout after {limits['tool_timeout_sec']}s. RETRY_HINT: reduce scope or split command."
 
-                result = await loop.run_in_executor(None, execute_tool, fn, fn_args, folder_id)
+                tool_calls += 1
                 last_tool_name = fn
                 last_tool_result = result
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                })
+                if _tool_result_failed(fn, result):
+                    had_tool_errors = True
+                    if fn == "web_search":
+                        fallback_args = {"query": fn_args.get("query", message)}
+                        yield f"data: {json.dumps({'type': 'step', 'text': 'fallback.search_local_knowledge', 'args': fallback_args})}\n\n"
+                        fb = await loop.run_in_executor(None, execute_tool, "search_local_knowledge", fallback_args, folder_id, dry_run)
+                        tool_calls += 1
+                        last_tool_name = "search_local_knowledge"
+                        last_tool_result = fb
+                        result = f"{result}\n\nFallback(search_local_knowledge):\n{fb}"
 
-                if fn == "web_search" and isinstance(result, str) and result.startswith("WEB_SEARCH_UNAVAILABLE"):
-                    text = (
-                        "La búsqueda web falló en este momento y no pude obtener resultados reales.\n\n"
-                        f"Detalle técnico: `{result}`\n\n"
-                        "Probá de nuevo en unos segundos o cambiá `WEB_SEARCH_ENGINE` en Configuración."
-                    )
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    return
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
-            # Fast-path for terminal actions: return deterministic status message
-            # instead of waiting for a second LLM pass that may return empty output.
+            if hard_stop:
+                break
+
             if last_tool_name == "run_windows_command" and last_tool_result:
                 summary = _summarize_windows_command_result(last_tool_result)
+                final_chunks.append(summary)
                 yield f"data: {json.dumps({'type': 'chunk', 'text': summary})}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
+                emitted_final = True
+                break
+            continue
 
-            continue  # next iteration with tool results in context
-
-        # ── Final response: stream it ────────────────────────────────────────
         try:
             emitted_any = False
             stream = await client.chat.completions.create(
@@ -996,15 +1661,20 @@ async def _agent_stream_normal(
                 delta_content = getattr(delta, "content", None) if delta else None
                 if delta_content:
                     emitted_any = True
+                    final_chunks.append(delta_content)
                     yield f"data: {json.dumps({'type': 'chunk', 'text': delta_content})}\n\n"
                     await asyncio.sleep(0)
             if not emitted_any:
                 if last_tool_result:
                     summary = _summarize_tool_result(last_tool_name, last_tool_result)
+                    final_chunks.append(summary)
                     yield f"data: {json.dumps({'type': 'chunk', 'text': summary})}\n\n"
                 else:
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': 'No pude ejecutar la acción automáticamente. Reintentá o reformulá con más detalle.'})}\n\n"
+                    txt = "No pude ejecutar la accion automaticamente. Reintenta o reformula con mas detalle."
+                    final_chunks.append(txt)
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': txt})}\n\n"
         except Exception as e:
+            had_tool_errors = True
             yield f"data: {json.dumps({'type': 'error', 'text': f'Stream error: {e}'})}\n\n"
         emitted_final = True
         break
@@ -1012,23 +1682,53 @@ async def _agent_stream_normal(
     if not emitted_final:
         if last_tool_result:
             summary = _summarize_tool_result(last_tool_name, last_tool_result)
+            final_chunks.append(summary)
             yield f"data: {json.dumps({'type': 'chunk', 'text': summary})}\n\n"
         else:
-            yield f"data: {json.dumps({'type': 'chunk', 'text': 'No se generó una respuesta útil. Probá de nuevo.'})}\n\n"
+            txt = "No se genero una respuesta util. Proba de nuevo."
+            final_chunks.append(txt)
+            yield f"data: {json.dumps({'type': 'chunk', 'text': txt})}\n\n"
+
+    final_text = "".join(final_chunks)
+    if is_research and final_text and not _extract_urls(final_text) and last_tool_result:
+        sources = _extract_urls(last_tool_result, limit=5)
+        if sources:
+            src_text = "\n\nFuentes:\n" + "\n".join(f"- {u}" for u in sources)
+            yield f"data: {json.dumps({'type': 'chunk', 'text': src_text})}\n\n"
+            final_text += src_text
+
+    confidence = _confidence_from_context(
+        tool_calls=tool_calls,
+        had_errors=had_tool_errors,
+        research_request=is_research,
+        answer_text=final_text,
+        web_result_text=last_tool_result or "",
+    )
+    yield f"data: {json.dumps({'type': 'confidence', 'score': confidence, 'tool_calls': tool_calls})}\n\n"
+
+    if conversation_id:
+        try:
+            fid = _safe_folder_id(folder_id)
+            _append_memory(conversation_id, fid, "user", message)
+            _append_memory(conversation_id, fid, "assistant", final_text)
+        except Exception:
+            pass
 
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
 
 async def _run_internal_agent_once(
     message: str,
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    conversation_id: str = "",
+    dry_run: bool = False,
 ) -> dict:
     text_chunks: list[str] = []
     steps: list[dict] = []
     error_text = ""
-    async for raw in _agent_stream_normal(message, history, system_prompt, folder_id):
+    confidence = None
+    async for raw in _agent_stream_normal(message, history, system_prompt, folder_id, conversation_id, dry_run):
         if not raw.startswith("data: "):
             continue
         payload = raw[6:].strip()
@@ -1045,10 +1745,13 @@ async def _run_internal_agent_once(
             steps.append({"tool": ev.get("text", ""), "args": ev.get("args", {})})
         elif et == "error":
             error_text = ev.get("text", "")
+        elif et == "confidence":
+            confidence = ev.get("score")
     return {
         "text": "".join(text_chunks).strip(),
         "steps": steps,
         "error": error_text.strip(),
+        "confidence": confidence,
     }
 
 
@@ -1130,8 +1833,11 @@ async def _iterate_stream(
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    conversation_id: str = "",
+    dry_run: bool = False,
 ) -> AsyncGenerator[str, None]:
     from guardrails.validator import validate_input
+
     safety = validate_input(message)
     if not safety.get("valid", True):
         err = safety.get("error", "Query rejected by safety filter.")
@@ -1141,15 +1847,15 @@ async def _iterate_stream(
 
     client, model = _get_client()
     sys_prompt = _compose_system_prompt(system_prompt)
-
     plan_req = (
-        "Generá un plan de ejecución en JSON puro con esta forma:\n"
-        "{\"objective\":\"...\",\"stages\":[{\"name\":\"...\",\"goal\":\"...\"}]}\n"
-        "Máximo 6 etapas. Sin texto extra."
+        "Genera un plan de ejecucion en JSON puro con esta forma:\n"
+        "{\"objective\":\"...\",\"stages\":[{\"name\":\"...\",\"goal\":\"...\",\"depends_on\":[],\"parallelizable\":false,\"checkpoint\":\"...\"}]}\n"
+        "maximo 8 etapas. depends_on contiene nombres de etapas previas. Sin texto extra."
     )
     planning_messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": f"{plan_req}\n\nTarea: {message}"}]
-    stages = [{"name": "Resolver tarea", "goal": message}]
+    stages = [{"name": "Resolver tarea", "goal": message, "depends_on": [], "parallelizable": False, "checkpoint": "tarea_completa"}]
     objective = message
+
     try:
         plan_resp = await client.chat.completions.create(
             model=model,
@@ -1164,50 +1870,64 @@ async def _iterate_stream(
             raw_stages = plan_json.get("stages")
             if isinstance(raw_stages, list) and raw_stages:
                 parsed = []
-                for s in raw_stages[:6]:
+                for s in raw_stages[:8]:
                     if not isinstance(s, dict):
                         continue
                     name = str(s.get("name") or "").strip()
                     goal = str(s.get("goal") or "").strip()
                     if name and goal:
-                        parsed.append({"name": name, "goal": goal})
+                        deps = s.get("depends_on")
+                        dep_names = [str(d).strip() for d in deps] if isinstance(deps, list) else []
+                        dep_names = [d for d in dep_names if d]
+                        parsed.append({
+                            "name": name,
+                            "goal": goal,
+                            "depends_on": dep_names,
+                            "parallelizable": bool(s.get("parallelizable", False)),
+                            "checkpoint": str(s.get("checkpoint") or f"{name.lower().replace(' ', '_')}_ok"),
+                        })
                 if parsed:
                     stages = parsed
     except Exception:
         pass
 
-    plan_md = [f"## Plan de ejecución (Iterador)\n", f"**Objetivo:** {objective}\n"]
+    plan_md = ["## Plan de ejecucion (Iterador)\n", f"**Objetivo:** {objective}\n"]
     for i, s in enumerate(stages, 1):
-        plan_md.append(f"{i}. **{s['name']}** — {s['goal']}")
+        dep = ", ".join(s.get("depends_on") or []) or "ninguna"
+        par = "si" if s.get("parallelizable") else "no"
+        plan_md.append(f"{i}. **{s['name']}** - {s['goal']} (deps: {dep}, paralelo: {par})")
     yield f"data: {json.dumps({'type': 'chunk', 'text': '\\n'.join(plan_md) + '\\n\\n'})}\n\n"
 
     exec_history = history[-10:]
-    max_retries = 2
-    for i, stage in enumerate(stages, 1):
+    max_retries = 3
+    done: dict[str, dict] = {}
+    pending = list(stages)
+
+    async def execute_stage(stage: dict, idx: int) -> tuple[bool, str, str, list[str]]:
         stage_name = stage.get("name", "")
         stage_goal = stage.get("goal", "")
-        yield f"data: {json.dumps({'type': 'chunk', 'text': f'### Etapa {i}/{len(stages)}: {stage_name}\\n'})}\n\n"
+        logs = [f"### Etapa {idx}/{len(stages)}: {stage_name}\n"]
         stage_ok = False
         last_output = ""
         for attempt in range(1, max_retries + 1):
             stage_prompt = (
-                f"Objetivo global: {objective}\n"
-                f"Etapa actual: {stage_name}\n"
-                f"Meta de etapa: {stage_goal}\n"
-                f"Intento {attempt}/{max_retries}. Ejecutá las acciones necesarias usando herramientas y reportá resultado."
+                f"Objetivo global: {objective}\\n"
+                f"Etapa actual: {stage_name}\\n"
+                f"Meta de etapa: {stage_goal}\\n"
+                f"Intento {attempt}/{max_retries}. Ejecuta las acciones necesarias usando herramientas y reporta resultado."
             )
-            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, folder_id)
+            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, folder_id, conversation_id, dry_run)
             last_output = result.get("text") or result.get("error") or ""
             if result.get("error"):
-                yield f"data: {json.dumps({'type': 'chunk', 'text': f'Intento {attempt}: error -> {result['error']}\\n'})}\n\n"
+                logs.append(f"Intento {attempt}: error -> {result['error']}\n")
             elif last_output:
-                yield f"data: {json.dumps({'type': 'chunk', 'text': f'Intento {attempt}: {last_output}\\n'})}\n\n"
+                logs.append(f"Intento {attempt}: {last_output}\n")
 
             validate_prompt = (
-                "Evaluá si la etapa está cumplida. Respondé JSON puro:\n"
-                "{\"passed\": true|false, \"reason\": \"...\"}\n\n"
-                f"Etapa: {stage_name}\n"
-                f"Meta: {stage_goal}\n"
+                "Evalua si la etapa esta cumplida. Responde JSON puro:\n"
+                "{\"passed\": true|false, \"reason\": \"...\"}\\n\\n"
+                f"Etapa: {stage_name}\\n"
+                f"Meta: {stage_goal}\\n"
                 f"Salida: {last_output[:3000]}"
             )
             passed = False
@@ -1225,26 +1945,75 @@ async def _iterate_stream(
                 reason = str(val_json.get("reason") or "")
             except Exception:
                 passed = bool(last_output and "error" not in last_output.lower())
-                reason = "Validación heurística aplicada."
+                reason = "Validacion heuristica aplicada."
 
             if passed:
                 stage_ok = True
                 ok_reason = reason or "ok"
-                yield f"data: {json.dumps({'type': 'chunk', 'text': f'✅ Etapa validada: {ok_reason}\\n\\n'})}\n\n"
+                logs.append(f"Etapa validada: {ok_reason}\n")
                 break
             else:
-                fail_reason = reason or "sin razón"
-                yield f"data: {json.dumps({'type': 'chunk', 'text': f'⚠️ Etapa no validada: {fail_reason}. Reintentando...\\n'})}\n\n"
+                fail_reason = reason or "sin razon"
+                logs.append(f"Etapa no validada: {fail_reason}. Reintentando...\n")
+        return stage_ok, last_output, stage.get("checkpoint", ""), logs
 
-        if not stage_ok:
-            yield f"data: {json.dumps({'type': 'chunk', 'text': f'❌ No se pudo completar la etapa \"{stage_name}\" tras {max_retries} intentos.\\n\\n'})}\n\n"
+    while pending:
+        ready = [s for s in pending if all(dep in done for dep in (s.get("depends_on") or []))]
+        if not ready:
+            names = ", ".join(str(s.get("name", "")) for s in pending)
+            yield f"data: {json.dumps({'type': 'error', 'text': f'No hay etapas ejecutables por dependencias. Pendientes: {names}'})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
-        exec_history = (exec_history + [{"role": "assistant", "content": last_output}])[-12:]
 
-    yield f"data: {json.dumps({'type': 'chunk', 'text': '## Iteración finalizada\\nSe completaron y validaron todas las etapas del plan.'})}\n\n"
+        parallel_batch = [s for s in ready if s.get("parallelizable")]
+        serial_batch = [s for s in ready if not s.get("parallelizable")]
+        batch = parallel_batch if parallel_batch else serial_batch[:1]
+
+        tasks = []
+        for s in batch:
+            idx = stages.index(s) + 1
+            tasks.append(execute_stage(s, idx))
+
+        results = []
+        if len(tasks) == 1:
+            results.append(await tasks[0])
+        else:
+            results = list(await asyncio.gather(*tasks))
+
+        for stage_obj, stage_result in zip(batch, results):
+            stage_name = str(stage_obj.get("name") or "")
+            stage_ok, last_output, checkpoint, logs = stage_result
+            for log_text in logs:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': log_text})}\n\n"
+            if not stage_ok:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': f'No se pudo completar la etapa \"{stage_name}\" tras {max_retries} intentos.\\n\\n'})}\n\n"
+                _save_snapshot(conversation_id, {
+                    "objective": objective,
+                    "status": "failed",
+                    "failed_stage": stage_name,
+                    "stages": stages,
+                    "done": done,
+                })
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            done[stage_name] = {"output": last_output, "checkpoint": checkpoint}
+            pending = [p for p in pending if p is not stage_obj]
+            exec_history = (exec_history + [{"role": "assistant", "content": last_output}])[-12:]
+            _save_snapshot(conversation_id, {
+                "objective": objective,
+                "status": "running",
+                "stages": stages,
+                "done": done,
+            })
+
+    _save_snapshot(conversation_id, {
+        "objective": objective,
+        "status": "completed",
+        "stages": stages,
+        "done": done,
+    })
+    yield f"data: {json.dumps({'type': 'chunk', 'text': '## Iteracion finalizada\\nSe completaron y validaron todas las etapas del plan.'})}\n\n"
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
 
 async def _agent_stream(
     message: str,
@@ -1252,17 +2021,53 @@ async def _agent_stream(
     system_prompt: str = "",
     folder_id: str = "",
     mode: str = "normal",
+    conversation_id: str = "",
+    dry_run: bool = False,
 ) -> AsyncGenerator[str, None]:
+    run_id = uuid.uuid4().hex[:12]
+    trace: dict[str, Any] = {
+        "run_id": run_id,
+        "conversation_id": conversation_id,
+        "folder_id": _safe_folder_id(folder_id),
+        "mode": (mode or "normal").strip().lower(),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "input": {"message": message, "history_size": len(history)},
+        "events": [],
+    }
+
+    async def _stream_and_trace(inner: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
+        try:
+            async for ev in inner:
+                if ev.startswith("data: "):
+                    payload = ev[6:].strip()
+                    if payload:
+                        try:
+                            trace["events"].append(json.loads(payload))
+                        except Exception:
+                            trace["events"].append({"type": "raw", "payload": payload[:800]})
+                yield ev
+        finally:
+            trace["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            _persist_trace(run_id, trace)
+            _emit_telemetry("run_completed", {
+                "run_id": run_id,
+                "conversation_id": conversation_id,
+                "mode": trace.get("mode"),
+                "event_count": len(trace.get("events") or []),
+            })
+
+    yield f"data: {json.dumps({'type': 'run', 'run_id': run_id})}\n\n"
+
     m = (mode or "normal").strip().lower()
     if m == "plan":
-        async for ev in _plan_stream(message, history, system_prompt):
+        async for ev in _stream_and_trace(_plan_stream(message, history, system_prompt)):
             yield ev
         return
     if m == "iterate":
-        async for ev in _iterate_stream(message, history, system_prompt, folder_id):
+        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, folder_id, conversation_id, dry_run)):
             yield ev
         return
-    async for ev in _agent_stream_normal(message, history, system_prompt, folder_id):
+    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, conversation_id, dry_run)):
         yield ev
 
 
@@ -1329,7 +2134,15 @@ app.add_middleware(
 async def chat(req: ChatRequest):
     _reload_config_runtime()
     return StreamingResponse(
-        _agent_stream(req.message, req.history, req.system_prompt, req.folder_id, req.mode),
+        _agent_stream(
+            req.message,
+            req.history,
+            req.system_prompt,
+            req.folder_id,
+            req.mode,
+            req.conversation_id,
+            req.dry_run,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1379,6 +2192,45 @@ async def health():
 
     all_ok = all(v["status"] == "ok" for v in components.values())
     return {"status": "online" if all_ok else "degraded", "components": components}
+
+
+@app.get("/connectors/health")
+async def connectors_health():
+    return {
+        "status": "ok",
+        "metrics": _CONNECTOR_METRICS,
+    }
+
+
+@app.get("/runs/{run_id}")
+async def get_run_trace(run_id: str):
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", (run_id or "").strip())
+    p = _trace_path(safe)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="run trace not found")
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"trace read error: {e}")
+
+
+@app.get("/snapshots")
+async def list_snapshots_endpoint():
+    return _list_snapshots()
+
+
+@app.get("/snapshots/{conversation_id}")
+async def get_snapshot(conversation_id: str):
+    data = _load_snapshot(conversation_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    return data
+
+
+@app.post("/snapshots/{conversation_id}")
+async def save_snapshot(conversation_id: str, payload: dict):
+    _save_snapshot(conversation_id, payload or {})
+    return {"success": True}
 
 
 @app.get("/settings")
@@ -1874,3 +2726,5 @@ if __name__ == "__main__":
         log_level="warning",
         access_log=False,
     )
+
+

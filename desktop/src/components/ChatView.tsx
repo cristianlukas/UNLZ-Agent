@@ -143,6 +143,9 @@ function Message({
           {isStreaming && msg.content && (
             <span className="inline-block w-0.5 h-3.5 bg-accent-light ml-0.5 animate-blink align-middle" />
           )}
+          {typeof msg.confidence === "number" && !isStreaming && !msg.error && (
+            <p className="mt-2 text-[10px] text-muted">Confianza estimada: {(msg.confidence * 100).toFixed(0)}%</p>
+          )}
         </div>
         {canEdit && onEdit && (
           <button
@@ -387,9 +390,20 @@ function ActiveChat({ convId }: { convId: string }) {
         historyForModel,
         buildSystemPrompt(),
         conv?.folderId,
-        mode
+        mode,
+        convId,
+        false
       )) {
-        if (event.type === "step") {
+        if (event.type === "run") {
+          const current = useStore
+            .getState()
+            .conversations.find((c) => c.id === convId)
+            ?.messages.find((m) => m.id === assistantId);
+          upsertMessage(convId, {
+            ...(current ?? assistantMsg),
+            runId: event.run_id,
+          });
+        } else if (event.type === "step") {
           upsertMessage(convId, {
             ...assistantMsg,
             steps: [
@@ -406,6 +420,15 @@ function ActiveChat({ convId }: { convId: string }) {
           upsertMessage(convId, {
             ...(current ?? assistantMsg),
             content: (current?.content ?? "") + event.text,
+          });
+        } else if (event.type === "confidence") {
+          const current = useStore
+            .getState()
+            .conversations.find((c) => c.id === convId)
+            ?.messages.find((m) => m.id === assistantId);
+          upsertMessage(convId, {
+            ...(current ?? assistantMsg),
+            confidence: event.score,
           });
         } else if (event.type === "error") {
           const current = useStore

@@ -28,7 +28,8 @@ Technical docs:
 
 ## Main Features
 
-- SSE chat streaming (`step`, `chunk`, `error`, `done`)
+- SSE chat streaming (`run`, `step`, `chunk`, `confidence`, `error`, `done`)
+- per-run trace persistence with `run_id`
 - Agent tools:
   - `search_local_knowledge`
   - `search_folder_documents`
@@ -41,6 +42,7 @@ Technical docs:
   - `normal`
   - `plan` (alternatives + final plan)
   - `iterate` (stage planning, execution, validation, retries)
+    - supports stage dependencies, parallelizable stages, and checkpoints
 - Folders:
   - group conversations
   - support base behavior + custom folder prompt
@@ -48,6 +50,8 @@ Technical docs:
 - Action execution modes:
   - `confirm` (ask before running)
   - `autonomous` (run directly)
+  - policy engine by operation class (`AGENT_POLICY_*`)
+  - idempotency keys and `dry_run` for mutating actions
 - Configurable window controls:
   - style `windows` or `mac`
   - side `left/right`
@@ -124,6 +128,10 @@ Config is stored in `.env` (editable from UI or file):
 - `AGENT_LANGUAGE=es|en|zh`
 - `AGENT_EXECUTION_MODE=confirm|autonomous`
 - `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
+- `WEB_SEARCH_ENGINE=google|duckduckgo|serpapi|bing|fusion|auto`
+- `AGENT_MAX_ITERATIONS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_WALL_TIME_SEC`, `AGENT_TOOL_TIMEOUT_SEC`
+- `AGENT_POLICY_FILESYSTEM|NETWORK|PROCESS|SYSTEM=allow|confirm|deny`
+- `AGENT_TELEMETRY_OPT_IN=true|false`
 - `MINIMIZE_TO_TRAY_ON_CLOSE=true|false`
 - `WINDOW_CONTROLS_STYLE=windows|mac`
 - `WINDOW_CONTROLS_SIDE=left|right`

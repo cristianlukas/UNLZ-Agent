@@ -29,6 +29,7 @@ Documentación técnica:
 ## Funcionalidades Principales
 
 - Chat con streaming SSE (`step`, `chunk`, `error`, `done`)
+- Chat con trazas de corrida (`run_id`) y score de confianza por respuesta
 - Herramientas del agente:
   - `search_local_knowledge`
   - `search_folder_documents`
@@ -41,6 +42,7 @@ Documentación técnica:
   - `normal`
   - `plan` (presenta alternativas y plan final)
   - `iterate` (planifica por etapas, ejecuta, valida y reintenta)
+    - soporta dependencias entre etapas, etapas paralelizables y checkpoints
 - Carpetas:
   - agrupan conversaciones
   - permiten comportamiento base + prompt personalizado por carpeta
@@ -48,6 +50,8 @@ Documentación técnica:
 - Modo de ejecución de acciones:
   - `confirm` (pregunta antes de ejecutar)
   - `autonomous` (ejecución directa)
+  - políticas por clase de operación (`AGENT_POLICY_*`: filesystem/network/process/system)
+  - idempotencia y `dry-run` para acciones mutantes
 - Barra de ventana configurable:
   - estilo `windows` o `mac`
   - lado `left/right`
@@ -67,6 +71,7 @@ Documentación técnica:
   - CPU, RAM, VRAM
   - discos por unidad/letra (C:, D:, ...)
   - estado/control de Agent Server y llama.cpp
+  - salud de conectores por API (`/connectors/health`)
 - Chat:
   - edición de mensajes user/assistant
   - "Guardar y recalcular"
@@ -124,6 +129,10 @@ La configuración vive en `.env` (editable desde UI o archivo):
 - `AGENT_LANGUAGE=es|en|zh`
 - `AGENT_EXECUTION_MODE=confirm|autonomous`
 - `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
+- `WEB_SEARCH_ENGINE=google|duckduckgo|serpapi|bing|fusion|auto`
+- `AGENT_MAX_ITERATIONS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_WALL_TIME_SEC`, `AGENT_TOOL_TIMEOUT_SEC`
+- `AGENT_POLICY_FILESYSTEM|NETWORK|PROCESS|SYSTEM=allow|confirm|deny`
+- `AGENT_TELEMETRY_OPT_IN=true|false`
 - `MINIMIZE_TO_TRAY_ON_CLOSE=true|false`
 - `WINDOW_CONTROLS_STYLE=windows|mac`
 - `WINDOW_CONTROLS_SIDE=left|right`

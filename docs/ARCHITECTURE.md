@@ -30,10 +30,18 @@ llama.cpp managed install location:
 - `iterate`: autonomous staged execution with validation and retries
 
 SSE events:
+- `run` (run id for trace lookup)
 - `step`
 - `chunk`
+- `confidence`
 - `error`
 - `done`
+
+Runtime controls:
+- `AGENT_MAX_ITERATIONS`
+- `AGENT_MAX_TOOL_CALLS`
+- `AGENT_MAX_WALL_TIME_SEC`
+- `AGENT_TOOL_TIMEOUT_SEC`
 
 ## Tool Inventory
 
@@ -44,6 +52,9 @@ SSE events:
 - `get_system_stats`
 - `list_knowledge_base_files`
 - `run_windows_command`
+- `verify_file_exists`
+- `verify_file_contains`
+- `verify_command_output`
 
 Folder-scoped behavior:
 - when a conversation has `folder_id`, backend disables `search_local_knowledge` and relies on `search_folder_documents` for exclusive folder docs.
@@ -67,12 +78,37 @@ Conversation prompt composition:
 
 `run_windows_command`:
 - blocked patterns for high-risk commands (`format`, `diskpart`, etc.)
+- idempotency keys for mutating actions
+- dry-run support (`dry_run=true`)
+- contract validation + structured retry hints
 - execution mode via `AGENT_EXECUTION_MODE`:
   - `confirm`
   - `autonomous`
+- policy classes via env:
+  - `AGENT_POLICY_FILESYSTEM`
+  - `AGENT_POLICY_NETWORK`
+  - `AGENT_POLICY_PROCESS`
+  - `AGENT_POLICY_SYSTEM`
 - timeout and output cap:
   - `AGENT_COMMAND_TIMEOUT_SEC`
   - `AGENT_COMMAND_MAX_OUTPUT`
+
+## Memory, Traces, Snapshots
+
+- Long-horizon memory store: `data/memory.jsonl`
+  - scoped by `conversation_id` + `folder_id`
+  - recency decay + lexical retrieval
+- Run traces: `data/runs/<run_id>.json`
+  - includes streamed events and mode metadata
+- Snapshots: `data/snapshots/<conversation_id>.json`
+  - used by iterate mode checkpoints/resume
+
+## Connector Health and Telemetry
+
+- `/connectors/health` surfaces provider/tool latency and error rates.
+- Optional telemetry (opt-in):
+  - `AGENT_TELEMETRY_OPT_IN=true`
+  - writes structured events to `data/telemetry.jsonl`.
 
 ## Window Controls UX
 

@@ -30,14 +30,18 @@ Request body:
   "history": [{ "role": "user|assistant", "content": "..." }],
   "system_prompt": "optional behavior prompt",
   "folder_id": "optional folder scope id",
-  "mode": "normal|plan|iterate"
+  "mode": "normal|plan|iterate",
+  "conversation_id": "optional stable id for memory/snapshots",
+  "dry_run": false
 }
 ```
 
 SSE event payloads (`data: {...}`):
 
+- `{"type":"run","run_id":"..."}`
 - `{"type":"step","text":"tool_name","args":{...}}`
 - `{"type":"chunk","text":"partial assistant output"}`
+- `{"type":"confidence","score":0.0-1.0,"tool_calls":N}`
 - `{"type":"error","text":"error message"}`
 - `{"type":"done"}`
 
@@ -45,6 +49,8 @@ Mode behavior:
 - `normal`: standard tool-calling loop
 - `plan`: planning only (alternatives + final decision prompt)
 - `iterate`: staged autonomous execution + validation + retries
+  - supports dependency graph (`depends_on`) + parallelizable stages
+  - writes checkpoints/snapshots per `conversation_id`
 
 ## Knowledge Base (Global)
 
@@ -74,6 +80,25 @@ Returns:
 - `vram_total_gb`, `vram_used_gb`, `vram_percent`, `gpus[]`
 - aggregate disk fields: `disk_total_gb`, `disk_used_gb`, `disk_percent`
 - per-disk array: `disks[]`
+
+## Agent Runtime Observability
+
+### `GET /runs/{run_id}`
+Returns full persisted trace for one run (events, mode, metadata).
+
+### `GET /connectors/health`
+Returns aggregated connector metrics:
+- web-search providers (latency/error rates)
+- tool runtime metrics (latency/error rates)
+
+### `GET /snapshots`
+Lists snapshot metadata for resumable multi-session tasks.
+
+### `GET /snapshots/{conversation_id}`
+Returns latest saved snapshot for a conversation.
+
+### `POST /snapshots/{conversation_id}`
+Saves/overwrites a custom snapshot payload.
 
 ## llama.cpp Management
 
@@ -123,3 +148,7 @@ Notable behavior:
 - when web search is unavailable, backend emits explicit failure text
 - in folder-scoped chat, `search_local_knowledge` is excluded and folder docs are preferred
 - Windows command execution mode is controlled by `AGENT_EXECUTION_MODE`
+- tool execution has typed contract validation + retry hints
+- mutating tools support idempotency keys and dry-run
+- policy engine (`AGENT_POLICY_FILESYSTEM|NETWORK|PROCESS|SYSTEM=allow|confirm|deny`)
+- runtime guardrails: max iterations, max tool calls, wall-time and per-tool timeout

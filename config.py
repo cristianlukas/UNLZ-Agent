@@ -25,7 +25,7 @@ class Config:
     AGENT_EXECUTION_MODE = os.getenv("AGENT_EXECUTION_MODE", "confirm").lower()  # confirm | autonomous
     AGENT_COMMAND_TIMEOUT_SEC = int(os.getenv("AGENT_COMMAND_TIMEOUT_SEC", "60"))
     AGENT_COMMAND_MAX_OUTPUT = int(os.getenv("AGENT_COMMAND_MAX_OUTPUT", "4000"))
-    WEB_SEARCH_ENGINE = os.getenv("WEB_SEARCH_ENGINE", "google").lower()    # google | duckduckgo | auto
+    WEB_SEARCH_ENGINE = os.getenv("WEB_SEARCH_ENGINE", "google").lower()    # google | duckduckgo | serpapi | bing | fusion | auto
 
     # Paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -69,8 +69,8 @@ class Config:
     def validate():
         if Config.AGENT_EXECUTION_MODE not in ("confirm", "autonomous"):
             raise ValueError("AGENT_EXECUTION_MODE must be 'confirm' or 'autonomous'")
-        if Config.WEB_SEARCH_ENGINE not in ("google", "duckduckgo", "auto"):
-            raise ValueError("WEB_SEARCH_ENGINE must be 'google', 'duckduckgo' or 'auto'")
+        if Config.WEB_SEARCH_ENGINE not in ("google", "duckduckgo", "serpapi", "bing", "fusion", "auto"):
+            raise ValueError("WEB_SEARCH_ENGINE must be one of: google, duckduckgo, serpapi, bing, fusion, auto")
 
         if Config.VECTOR_DB_PROVIDER == "supabase":
             if not Config.SUPABASE_URL or not Config.SUPABASE_KEY:
