@@ -39,3 +39,4 @@ mcp.json
 *.log
 dist-single-exe/UNLZ-Agent-Setup.exe
 desktop/src-tauri/binaries/agent_server.exe
+.claude/worktrees/gracious-einstein-90c379/
