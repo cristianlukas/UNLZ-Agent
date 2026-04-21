@@ -1,98 +1,123 @@
 ![Logo Institucional](https://github.com/JonatanBogadoUNLZ/PPS-Jonatan-Bogado/blob/9952aac097aca83a1aadfc26679fc7ec57369d82/LOGO%20AZUL%20HORIZONTAL%20-%20fondo%20transparente.png)
 
 # Universidad Nacional de Lomas de Zamora - Facultad de Ingeniería
-# UNLZ Agent: Asistente Autónomo Multi-Modal
+# UNLZ Agent
 
 [🇬🇧 English](README_EN.md) | [🇪🇸 Español](README.md)
 
-## Descripción General
+UNLZ Agent es un asistente local con interfaz desktop (Tauri + React) y backend FastAPI con herramientas, ejecución de acciones en Windows, carpetas de contexto y modos de planificación/iteración.
 
-Este proyecto es un **Agente Autónomo Multi-Modal** diseñado para investigación y asistencia flexible. Utiliza el **Protocolo de Contexto de Modelos (MCP)** para exponer recursos locales (archivos, estadísticas) a un flujo de trabajo agéntico orquestado por **n8n** y potenciado por una arquitectura **RAG** flexible.
+## Estado del Proyecto
 
-## Arquitectura
+- Modo recomendado actual: `desktop/` + `agent_server.py`
+- Modo legado disponible: `frontend/` (Next.js) + `mcp_server.py` + n8n
+
+## Arquitectura Actual (Desktop)
 
 ```mermaid
 graph TD
-    A[Base de Conocimiento<br/>Carpeta /data] -->|Protocolo MCP| B(Servidor MCP<br/>Script Python)
-    B -->|Expone Herramientas| C[Flujo de trabajo n8n<br/>Orquestador de Agente Local]
-    C -->|Almacena/Recupera| D[Supabase<br/>Base de Datos Vectorial y Memoria]
-    C -->|Busqueda| E[Herramienta de Búsqueda Web]
-    C -->|Inferencia LLM| F[Ollama<br/>Localhost:11434]
+    UI["Desktop UI (Tauri + React)"] -->|HTTP/SSE| API["agent_server.py (FastAPI) :7719"]
+    API --> LLM["LLM provider (llama.cpp / Ollama / OpenAI)"]
+    API --> RAG["RAG pipeline (Chroma/Supabase)"]
+    API --> TOOLS["Tools: web_search, run_windows_command, stats, folder docs"]
 ```
 
-## Capacidades del Sistema
+Documentación técnica:
+- [Arquitectura](docs/ARCHITECTURE.md)
+- [API](docs/API.md)
 
-Esta aplicación está diseñada priorizando la modularidad, la seguridad y la escalabilidad:
+## Funcionalidades Principales
 
-- **Arquitectura RAG Híbrida**: Pipeline flexible (`rag_pipeline/`) que soporta tanto persistencia local (ChromaDB) como almacenamiento vectorial en la nube (Supabase), configurable dinámicamente.
-- **Guardrails de Seguridad**: Capa de validación integrada (`guardrails/`) para sanitizar consultas y prevenir ataques de inyección de prompt.
-- **Herramientas MCP Extensibles**: Servidor de Protocolo de Contexto de Modelos personalizado que expone utilidades Python al flujo de trabajo del agente.
-- **Configuración Centralizada**: Gestión unificada de configuraciones (`config.py`) implementando patrones de diseño para alternar entre proveedores de inferencia Local (Ollama) y Cloud (OpenAI).
-- **Frontend Moderno**: Interfaz web Next.js reactiva para la interacción con el agente y el monitoreo del sistema.
+- Chat con streaming SSE (`step`, `chunk`, `error`, `done`)
+- Herramientas del agente:
+  - `search_local_knowledge`
+  - `search_folder_documents`
+  - `web_search` (Google/DuckDuckGo/auto)
+  - `get_current_time`
+  - `get_system_stats`
+  - `list_knowledge_base_files`
+  - `run_windows_command`
+- Modos de chat:
+  - `normal`
+  - `plan` (presenta alternativas y plan final)
+  - `iterate` (planifica por etapas, ejecuta, valida y reintenta)
+- Carpetas:
+  - agrupan conversaciones
+  - permiten comportamiento base + prompt personalizado por carpeta
+  - soportan documentos exclusivos por carpeta
+- Modo de ejecución de acciones:
+  - `confirm` (pregunta antes de ejecutar)
+  - `autonomous` (ejecución directa)
+- Barra de ventana configurable:
+  - estilo `windows` o `mac`
+  - lado `left/right`
+  - orden de botones (`minimize/maximize/close`)
+- Selector de modelos llama.cpp:
+  - dropdown de `.gguf` detectados en carpeta de modelos y subdirectorios
+  - botón `↻` para reanalizar en caliente sin cerrar la app
+- Vista Sistema:
+  - CPU, RAM, VRAM
+  - discos por unidad/letra (C:, D:, ...)
+  - estado/control de Agent Server y llama.cpp
+- Chat:
+  - edición de mensajes user/assistant
+  - "Guardar y recalcular"
+  - selector de comportamiento por cards en conversación vacía
+  - cards de sugerencias que crean conversación y mantienen el texto prellenado en el input
+
+## Requisitos
+
+- Windows 10/11
+- Python 3.10+
+- Node.js 18+
+- Rust toolchain (para Tauri)
+- (Opcional) llama.cpp, Ollama, OpenAI API key
+
+## Instalación Rápida
+
+Desde la raíz del repo:
+
+```powershell
+.\setup-desktop.ps1
+```
+
+## Ejecución (Desktop)
+
+```powershell
+.\start-desktop.ps1
+```
+
+Esto levanta la app desktop y el backend local.
 
 ## Configuración
 
-### 1. Requisitos Previos
+La configuración vive en `.env` (editable desde UI o archivo):
 
-- Python 3.10+
-- n8n (Auto-hospedado o Cloud)
-- **LLM**: Ollama (Local) O OpenAI (Cloud)
-- **Base de Datos Vectorial**: ChromaDB (Local por defecto) O Supabase (Cloud)
+- `LLM_PROVIDER=llamacpp|ollama|openai`
+- `AGENT_LANGUAGE=es|en|zh`
+- `AGENT_EXECUTION_MODE=confirm|autonomous`
+- `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
+- `WINDOW_CONTROLS_STYLE=windows|mac`
+- `WINDOW_CONTROLS_SIDE=left|right`
+- `WINDOW_CONTROLS_ORDER=minimize,maximize,close` (u otra permutación)
+- `LLAMACPP_*`, `OLLAMA_*`, `OPENAI_*`, `SUPABASE_*`
 
-### 2. Instalación
+Referencia inicial: `.env.example`.
 
-1.  **Clonar el repositorio**:
+## Modo Legado (Web)
 
-    ```bash
-    git clone https://github.com/tu-usuario/UNLZ-Agent.git
-    cd UNLZ-Agent
-    ```
+El stack `frontend/` + `mcp_server.py` + n8n sigue en el repo para compatibilidad, pero no es el flujo principal recomendado.
 
-2.  **Configuración del Backend (Python)**:
-    Necesario para el servidor MCP y el pipeline RAG.
+## Troubleshooting Rápido
 
-    ```bash
-    # Crear entorno virtual
-    python -m venv venv
-
-    # Activar entorno virtual
-    # Windows:
-    .\venv\Scripts\activate
-    # Mac/Linux:
-    source venv/bin/activate
-
-    # Instalar dependencias
-    pip install -r requirements.txt
-    ```
-
-3.  **Configuración del Frontend (Node.js)**:
-    Necesario para la interfaz web.
-
-    ```bash
-    cd frontend
-    npm install
-    # o
-    yarn install
-    ```
-
-4.  **Configuración (Opcional)**:
-    Puedes configurar el agente directamente desde la página de **Configuración** en la interfaz web.
-    Alternativamente, crea un archivo `.env` en el directorio raíz:
-
-    ```env
-    # Opcional: Pre-configurar ajustes
-    VECTOR_DB_PROVIDER=chroma
-    LLM_PROVIDER=ollama
-    MCP_PORT=8000
-    ```
-
-### 3. Ejecutar la Aplicación
-
-Esta es una aplicación "Full Stack". Solo necesitas iniciar el frontend, y este gestionará automáticamente el backend (Servidor MCP).
-
-```bash
-cd frontend
-npm run dev
-```
-
-Abre [http://localhost:3000](http://localhost:3000) en tu navegador. El backend "UNLZ Agent" iniciará automáticamente.
+- `TypeError: network error` en UI:
+  - revisar `agent_server.log`
+  - reiniciar con `.\start-desktop.ps1`
+- respuesta vacía en acciones:
+  - verificar `AGENT_EXECUTION_MODE`
+  - usar prompts de acción explícitos
+- `llama.cpp unreachable`:
+  - validar `LLAMACPP_EXECUTABLE`, `LLAMACPP_MODEL_PATH`, puerto `8080`
+- `web_search` sin resultados:
+  - cambiar `WEB_SEARCH_ENGINE` o reintentar
+  - si falla, el agente devuelve error explícito de búsqueda web

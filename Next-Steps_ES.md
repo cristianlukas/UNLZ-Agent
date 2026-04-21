@@ -1,54 +1,37 @@
-# Próximos Pasos y Hoja de Ruta
+# Proximos Pasos y Hoja de Ruta
 
 [🇬🇧 English](Next-Steps.md) | [🇪🇸 Español](Next-Steps_ES.md)
 
-Ahora que la estructura principal está en su lugar, sigue esta hoja de ruta para finalizar el proyecto para tu portafolio.
+Roadmap actualizado al estado actual del proyecto (desktop + agent_server).
 
-## Fase 1: Integración (Puesta en Marcha)
+## Fase 1: Estabilidad Operativa
 
-- [ ] **Instalar Dependencias en Máquina Local**
-      Ejecuta `pip install -r requirements.txt` en este directorio.
+- [ ] Agregar tests automatizados para `/chat` (casos `step/chunk/error/done`).
+- [ ] Agregar test para fallback de `web_search` (sin resultados y error de proveedor).
+- [ ] Registrar metricas basicas (latencia, errores por endpoint, tool failures).
+- [ ] Implementar rotacion de `agent_server.log`.
 
-- [ ] **Configurar Ollama**
-  - Instala Ollama.
-  - Ejecuta `ollama pull qwen2.5-coder:14b`.
-  - Asegúrate de que escuche en el puerto 11434.
+## Fase 2: Agente y Herramientas
 
-- [ ] **Configurar n8n**
-  - Importa `n8n_workflow.json` en tu instancia local de n8n.
-  - Configura las Credenciales de Ollama (URL Base: `http://localhost:11434` o `http://host.docker.internal:11434`).
-  - Configura las credenciales de Supabase en n8n.
+- [ ] Mejorar policy de comandos Windows (listas permitidas por contexto + audit trail).
+- [ ] Agregar confirmaciones finas por tipo de operacion (filesystem, red, procesos).
+- [ ] Incorporar fuentes/citas para respuestas de investigacion cuando usa `web_search`.
+- [ ] Añadir soporte de busqueda web adicional configurable (ej. SerpAPI/Bing).
 
-- [ ] **Probar el Ciclo**
-  - Dispara el flujo de trabajo de n8n manualmente.
-  - Verifica que llame correctamente a la herramienta `get_system_stats` desde tu `mcp_server.py` en ejecución.
+## Fase 3: UX de Chat
 
-## Fase 2: Mejoras Técnicas (Las Características "Senior")
+- [ ] Mostrar motivo de fallo de herramienta en UI con detalle expandible.
+- [ ] Historial de ediciones de mensajes (versionado liviano).
+- [ ] Mejoras de accesibilidad (focus states, atajos, lectura de pantalla).
 
-- [ ] **Monitoreo Real de GPU**
-      Actualmente `mcp_server.py` usa datos simulados para `gpu_stats`.
-  - **Acción**: Modificar `get_system_stats` para usar `shutil.which('nvidia-smi')` y ejecutar el comando para obtener el uso real de VRAM.
-  - _Por qué_: Demuestra que puedes manejar interoperabilidad de hardware real.
+## Fase 4: Distribucion
 
-- [ ] **Implementar Almacenamiento Vectorial (RAG)**
-  - **Acción**: Crear un script Python (o flujo n8n) que:
-    1. Lea PDFs de `UNLZ-AI-STUDIO/system/data`.
-    2. Los divida en fragmentos (chunking).
-    3. Genere embeddings (usa Qwen o un modelo pequeño de embeddings).
-    4. Los inserte (upsert) en la tabla `vector` de Supabase.
-  - _Por qué_: Esencial para la parte de "Investigación" del agente.
+- [ ] Pipeline CI para build portable (`build-portable.ps1`) con artefactos versionados.
+- [ ] Firma de binarios para distribucion Windows.
+- [ ] Guia de release reproducible (checklist + versionado semantico).
 
-- [ ] **Agregar Herramienta de "Búsqueda"**
-  - **Acción**: Agregar una nueva herramienta a `mcp_server.py` llamada `search_local_files(query: str)`.
-  - Debería filtrar la lista de archivos o hacer grep en los contenidos para encontrar archivos relevantes antes de leerlos.
+## Fase 5: Documentacion
 
-## Fase 3: Pulido del Portafolio (La Presentación)
-
-- [ ] **Grabar un Video Demo**
-  - Graba la pantalla con un flujo completo:
-    1. Tú preguntando: "¿Cómo está la carga del servidor?" -> El Agente consulta MCP -> Devuelve estadísticas reales.
-    2. Tú preguntando: "Resume la investigación sobre X" -> El Agente consulta Supabase -> Devuelve la respuesta.
-  - Sube a YouTube/Loom e incrústalo en `README_ES.md`.
-
-- [ ] **Subir a GitHub**
-  - `git push origin master`
+- [ ] Mantener docs de API sincronizados por version.
+- [ ] Agregar seccion de "breaking changes" entre modo legado y desktop.
+- [ ] Publicar un diagrama de secuencia del flujo chat + tools + SSE.

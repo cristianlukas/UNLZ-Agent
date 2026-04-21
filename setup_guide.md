@@ -1,101 +1,87 @@
-# Setup Guide: UNLZ Agent
+# Setup Guide (Desktop): UNLZ Agent
 
 [🇬🇧 English](setup_guide.md) | [🇪🇸 Español](setup_guide_ES.md)
 
-This guide explains how to connect your **Ollama**, **Local n8n**, and **Supabase/Chroma** using this MCP server.
+This guide covers the recommended current flow: Tauri desktop app + `agent_server.py`.
 
-## 1. Environment Setup
+## 1. Requirements
 
-### Install Dependencies
+- Windows 10/11
+- Python 3.10+
+- Node.js 18+
+- Rust (cargo toolchain)
 
-Open a terminal in this folder and run:
+## 2. First-time setup
 
-```powershell
-pip install -r requirements.txt
-```
-
-### Verify UNLZ AI Studio Path
-
-Ensure your folder structure looks like this:
-
-Documents/GitHub/
-├── UNLZ-Agent/ <-- This repository
-│ ├── data/ <-- Local Knowledge Base (PDFs go here)
-│ ├── mcp_server.py
-│ └── ...
-
-## 2. Running the MCP Server
-
-Run the server to expose local tools:
+From repository root:
 
 ```powershell
-python mcp_server.py
+.\setup-desktop.ps1
 ```
 
-### RAG Configuration (Environment Variables)
+This script:
+- installs/checks Rust
+- creates `venv` and installs `requirements.txt`
+- installs `desktop/` dependencies
+- generates placeholder Tauri icons if needed
+- creates `.env` from `.env.example` when missing
 
-To enable the RAG pipeline, you must set these environment variables before running the server:
+## 3. Configure `.env`
+
+Minimal llama.cpp example:
+
+```env
+LLM_PROVIDER=llamacpp
+AGENT_LANGUAGE=es
+AGENT_EXECUTION_MODE=confirm
+WEB_SEARCH_ENGINE=google
+WINDOW_CONTROLS_STYLE=windows
+WINDOW_CONTROLS_SIDE=right
+WINDOW_CONTROLS_ORDER=minimize,maximize,close
+LLAMACPP_EXECUTABLE=C:\path\to\llama-server.exe
+LLAMACPP_MODEL_PATH=C:\path\to\model.gguf
+LLAMACPP_MODEL_ALIAS=my-model
+LLAMACPP_HOST=127.0.0.1
+LLAMACPP_PORT=8080
+```
+
+## 4. Run
 
 ```powershell
-$env:SUPABASE_URL="your-project-url"
-$env:SUPABASE_KEY="your-anon-key"
-python mcp_server.py
+.\start-desktop.ps1
 ```
 
-## 3. Running Ollama (Authentication-Free LLM)
+Notes:
+- `agent_server.py` listens on `http://127.0.0.1:7719`
+- startup script cleans stale listeners on `1420` and `7719`
 
-1.  Download and install [Ollama](https://ollama.com/).
-2.  Pull a model (e.g., Qwen 2.5 Coder, excellent for this task):
-    ```powershell
-    ollama pull qwen2.5-coder:14b
-    ```
-3.  Verify it's running at `http://localhost:11434`.
+## 5. Key features to test
 
-## 4. Configuring Local n8n
+- **llama.cpp model selector**:
+  - auto-detected `.gguf` dropdown
+  - `↻` rescan button for new models while app is running
+- **Plan mode**: chat button, affects first send only
+- **Iterator mode**: staged autonomous execution + validation
+- **Folders**:
+  - create folder
+  - assign conversations
+  - folder prompt
+  - folder-exclusive documents
+- **Window controls**:
+  - Windows/Mac style
+  - configurable side and order
 
-### Running n8n
+## 6. Common issues
 
-If you are running n8n via Docker, you need to ensure it can reach your host machine's Ollama and MCP server.
+- `network error` in chat:
+  - inspect `agent_server.log`
+  - restart with `start-desktop.ps1`
+- empty action outputs:
+  - verify `AGENT_EXECUTION_MODE`
+  - use explicit action prompts
+- `llama.cpp unreachable`:
+  - validate executable/model/port
 
-- Access host services using `http://host.docker.internal:11434` (Ollama) and `http://host.docker.internal:8000` (MCP).
+## 7. Legacy mode (optional)
 
-### Workflow Setup
-
-1.  Import `n8n_workflow.json`.
-2.  **Ollama Node**: Ensure the Base URL is set to `http://host.docker.internal:11434` (if in Docker) or `http://localhost:11434` (if native).
-3.  **Supabase**: Connect your free tier credentials for the Vector Store.
-
-## 5. RAG with Supabase
-
-1.  Create a Supabase project (Free Tier).
-2.  Enable the `pgvector` extension in SQL Editor: `create extension vector;`
-3.  In n8n, use the **Supabase Vector Store** node to insert and retrieve documents.
-
-## 6. Running the Web GUI (Frontend)
-
-The project includes a modern Next.js interface.
-
-1.  Open a new terminal.
-2.  Navigate to the frontend folder:
-    ```powershell
-    cd frontend
-    ```
-3.  Start the development server:
-    ```powershell
-    npm run dev
-    ```
-4.  Open [http://localhost:3000](http://localhost:3000) in your browser.
-
-## 7. Configuring the Agent (Hybrid Mode)
-
-Go to [http://localhost:3000/settings](http://localhost:3000/settings) to configure your stack:
-
-- **Vector DB**: Choose between Local (ChromaDB) or Cloud (Supabase).
-- **LLM**: Choose between Ollama or OpenAI.
-- **n8n URL**: Set your Webhook URL.
-
-Settings are saved to your local `.env` file automatically.
-
-## Diagram
-
-refer to `README.md` for the architecture overview.
+`frontend/` + `mcp_server.py` + n8n is still available for compatibility, but it is not the primary mode.

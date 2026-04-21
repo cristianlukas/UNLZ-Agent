@@ -2,69 +2,56 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 
-// Helper to check URL connectivity
-async function checkUrl(url: string, method: string = 'GET') {
+async function checkUrl(url: string, method: string = 'GET'): Promise<boolean> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000); // 2s timeout
-    const res = await fetch(url, { 
-        method, 
-        signal: controller.signal 
-    });
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(url, { method, signal: controller.signal });
     clearTimeout(timeoutId);
     return res.ok;
-  } catch (e) {
+  } catch {
     return false;
   }
 }
 
-function buildOllamaCheckUrls(baseUrl: string) {
-  const sanitizedBase = baseUrl.trim().replace(/\/+$/, '');
-  const urls = new Set<string>([`${sanitizedBase}/api/tags`]);
-
+function buildAlternateUrls(baseUrl: string, suffix: string): string[] {
+  const sanitized = baseUrl.trim().replace(/\/+$/, '');
+  const urls = new Set<string>([`${sanitized}${suffix}`]);
   try {
-    const parsed = new URL(sanitizedBase);
+    const parsed = new URL(sanitized);
     if (parsed.hostname === 'localhost') {
       parsed.hostname = '127.0.0.1';
-      urls.add(`${parsed.toString().replace(/\/+$/, '')}/api/tags`);
+      urls.add(`${parsed.toString().replace(/\/+$/, '')}${suffix}`);
     } else if (parsed.hostname === '127.0.0.1') {
       parsed.hostname = 'localhost';
-      urls.add(`${parsed.toString().replace(/\/+$/, '')}/api/tags`);
+      urls.add(`${parsed.toString().replace(/\/+$/, '')}${suffix}`);
     }
-  } catch {
-    // Keep configured URL only if it cannot be parsed.
-  }
-
+  } catch { /* keep original */ }
   return Array.from(urls);
 }
 
 export async function GET() {
   const envPath = path.join(process.cwd(), '..', '.env');
   const envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
-  
-  // Parse .env manually to get latest config without waiting for process.env reload
+
   const config: Record<string, string> = {};
-  envContent.split('\n').forEach(line => {
+  envContent.split('\n').forEach((line) => {
     const [key, ...rest] = line.split('=');
-    if (key && rest) config[key.trim()] = rest.join('=').trim();
+    if (key && rest.length) config[key.trim()] = rest.join('=').trim();
   });
 
-  const checks = {
+  const checks: Record<string, { status: string; details: string }> = {
     llm: { status: 'unknown', details: '' },
     vectordb: { status: 'unknown', details: '' },
     n8n: { status: 'unknown', details: '' },
-    mcp: { status: 'unknown', details: '' }
+    mcp: { status: 'unknown', details: '' },
   };
 
-  // 0. MCP Server Check (Port 8000)
-  // 0. MCP Server Check
+  // ── MCP ──────────────────────────────────────────────────────────────────
   const mcpPort = config['MCP_PORT'] || '8000';
-  // Check both IPv4 and localhost to avoid false negatives on some Windows setups.
-  const mcpUrls = [`http://127.0.0.1:${mcpPort}/`, `http://localhost:${mcpPort}/`];
   let mcpReachable = false;
-  let lastMcpError: unknown = null;
 
-  for (const mcpUrl of mcpUrls) {
+  for (const mcpUrl of [`http://127.0.0.1:${mcpPort}/`, `http://localhost:${mcpPort}/`]) {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 1000);
     try {
@@ -72,113 +59,120 @@ export async function GET() {
       checks.mcp = { status: 'ok', details: `MCP Server active on port ${mcpPort}` };
       mcpReachable = true;
       break;
-    } catch (error) {
-      lastMcpError = error;
+    } catch (error: unknown) {
+      const e = error as { name?: string; cause?: { code?: string } };
+      if (!mcpReachable) {
+        if (e?.name === 'AbortError') {
+          checks.mcp = { status: 'warning', details: `MCP Port ${mcpPort} open (slow)` };
+        } else if (e?.cause?.code === 'ECONNREFUSED') {
+          checks.mcp = { status: 'error', details: `Port ${mcpPort} connection refused` };
+        } else {
+          checks.mcp = { status: 'error', details: `MCP unreachable on port ${mcpPort}` };
+        }
+      }
     } finally {
       clearTimeout(id);
     }
   }
 
-  if (!mcpReachable) {
-    const err = lastMcpError as { name?: string; cause?: { code?: string } } | null;
-    if (err?.name === 'AbortError') {
-      checks.mcp = { status: 'warning', details: `MCP Port ${mcpPort} Open (slow)` };
-    } else if (err?.cause?.code === 'ECONNREFUSED') {
-      checks.mcp = { status: 'error', details: `Port ${mcpPort} Connection Refused` };
-    } else {
-      checks.mcp = { status: 'error', details: `MCP unreachable on port ${mcpPort}` };
-    }
-  }
+  // ── LLM ──────────────────────────────────────────────────────────────────
+  const llmProvider = (config['LLM_PROVIDER'] || 'ollama').toLowerCase();
 
-  // 1. LLM Check
-  const llmProvider = config['LLM_PROVIDER'] || 'ollama';
-  if (llmProvider === 'ollama') {
+  if (llmProvider === 'llamacpp') {
+    const host = config['LLAMACPP_HOST'] || '127.0.0.1';
+    const port = config['LLAMACPP_PORT'] || '8080';
+    const healthUrl = `http://${host}:${port}/health`;
+    const ok = await checkUrl(healthUrl);
+    const alias = config['LLAMACPP_MODEL_ALIAS'] || 'local-model';
+    checks.llm = {
+      status: ok ? 'ok' : 'error',
+      details: ok
+        ? `llama.cpp running — model: ${alias}`
+        : `llama.cpp unreachable at http://${host}:${port}`,
+    };
+  } else if (llmProvider === 'ollama') {
     const configuredUrl = config['OLLAMA_BASE_URL']?.trim() || 'http://localhost:11434';
-    const ollamaCheckUrls = buildOllamaCheckUrls(configuredUrl);
+    const ollamaCheckUrls = buildAlternateUrls(configuredUrl, '/api/tags');
     let reachableUrl = '';
-
-    for (const ollamaCheckUrl of ollamaCheckUrls) {
-      if (await checkUrl(ollamaCheckUrl)) {
-        reachableUrl = ollamaCheckUrl.replace(/\/api\/tags$/, '');
+    for (const url of ollamaCheckUrls) {
+      if (await checkUrl(url)) {
+        reachableUrl = url.replace(/\/api\/tags$/, '');
         break;
       }
     }
-
     checks.llm = {
       status: reachableUrl ? 'ok' : 'error',
       details: reachableUrl
-        ? `Ollama Running at ${reachableUrl}`
-        : `Ollama unreachable at ${configuredUrl}`
+        ? `Ollama running at ${reachableUrl}`
+        : `Ollama unreachable at ${configuredUrl}`,
     };
   } else {
-    // OpenAI Check (Basic API Key presence)
     const hasKey = !!config['OPENAI_API_KEY'];
-    checks.llm = { 
-        status: hasKey ? 'ok' : 'warning', 
-        details: hasKey ? 'OpenAI Key set' : 'OpenAI Key missing'
+    checks.llm = {
+      status: hasKey ? 'ok' : 'warning',
+      details: hasKey ? 'OpenAI key configured' : 'OpenAI key missing',
     };
   }
 
-  // 2. Vector DB Check
-  const vectorProvider = config['VECTOR_DB_PROVIDER'] || 'chroma';
+  // ── Vector DB ─────────────────────────────────────────────────────────────
+  const vectorProvider = (config['VECTOR_DB_PROVIDER'] || 'chroma').toLowerCase();
   if (vectorProvider === 'chroma') {
-    // Ensure local data folder exists for local vector storage.
     const dataDir = path.join(process.cwd(), '..', 'data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    const exists = fs.existsSync(dataDir);
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     checks.vectordb = {
-        status: exists ? 'ok' : 'warning',
-        details: exists ? 'Local /data folder found' : '/data folder missing'
+      status: 'ok',
+      details: 'Local /data folder ready',
     };
   } else {
     const hasUrl = !!config['SUPABASE_URL'];
     const hasKey = !!config['SUPABASE_KEY'];
     checks.vectordb = {
-        status: hasUrl && hasKey ? 'ok' : 'error',
-        details: hasUrl && hasKey ? 'Supabase Credentials set' : 'Missing Supabase Config'
+      status: hasUrl && hasKey ? 'ok' : 'error',
+      details: hasUrl && hasKey ? 'Supabase credentials set' : 'Missing Supabase config',
     };
   }
 
-  // 3. n8n Check
-  const configuredN8nWebhook =
-    config['N8N_WEBHOOK_URL']?.trim() || 'http://127.0.0.1:5678/webhook/chat';
-  const n8nOrigins = new Set<string>();
+  // ── n8n ───────────────────────────────────────────────────────────────────
+  const n8nEnabled = (config['N8N_ENABLED'] ?? 'true').toLowerCase() !== 'false';
 
-  try {
-    const parsed = new URL(configuredN8nWebhook);
-    n8nOrigins.add(parsed.origin);
-    if (parsed.hostname === 'localhost') {
-      parsed.hostname = '127.0.0.1';
-      n8nOrigins.add(parsed.origin);
-    } else if (parsed.hostname === '127.0.0.1') {
-      parsed.hostname = 'localhost';
-      n8nOrigins.add(parsed.origin);
-    }
-  } catch {
-    checks.n8n = { status: 'error', details: 'Invalid Webhook URL' };
-  }
+  if (!n8nEnabled) {
+    checks.n8n = { status: 'ok', details: 'n8n disabled — using direct LLM mode' };
+  } else {
+    const configuredN8nWebhook = config['N8N_WEBHOOK_URL']?.trim() || 'http://127.0.0.1:5678/webhook/chat';
+    const n8nOrigins = new Set<string>();
 
-  if (checks.n8n.status === 'unknown') {
-    let reachableOrigin = '';
-    for (const origin of n8nOrigins) {
-      if (await checkUrl(`${origin}/healthz`) || await checkUrl(`${origin}/rest/settings`)) {
-        reachableOrigin = origin;
-        break;
+    try {
+      const parsed = new URL(configuredN8nWebhook);
+      n8nOrigins.add(parsed.origin);
+      if (parsed.hostname === 'localhost') {
+        parsed.hostname = '127.0.0.1';
+        n8nOrigins.add(parsed.origin);
+      } else if (parsed.hostname === '127.0.0.1') {
+        parsed.hostname = 'localhost';
+        n8nOrigins.add(parsed.origin);
       }
+    } catch {
+      checks.n8n = { status: 'error', details: 'Invalid webhook URL' };
     }
 
-    checks.n8n = reachableOrigin
-      ? { status: 'ok', details: `n8n reachable at ${reachableOrigin}` }
-      : { status: 'error', details: `n8n unreachable from ${configuredN8nWebhook}` };
+    if (checks.n8n.status === 'unknown') {
+      let reachableOrigin = '';
+      for (const origin of n8nOrigins) {
+        if (await checkUrl(`${origin}/healthz`) || await checkUrl(`${origin}/rest/settings`)) {
+          reachableOrigin = origin;
+          break;
+        }
+      }
+      checks.n8n = reachableOrigin
+        ? { status: 'ok', details: `n8n reachable at ${reachableOrigin}` }
+        : { status: 'error', details: `n8n unreachable from ${configuredN8nWebhook}` };
+    }
   }
 
-  // Global Status
-  const isHealthy = Object.values(checks).every(c => c.status === 'ok');
+  const isHealthy = Object.values(checks).every((c) => c.status === 'ok');
 
   return NextResponse.json({
     status: isHealthy ? 'online' : 'degraded',
-    components: checks
+    components: checks,
   });
 }

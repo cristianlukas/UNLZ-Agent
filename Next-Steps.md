@@ -1,54 +1,37 @@
-# Next Steps & Roadmap
+# Next Steps and Roadmap
 
 [🇬🇧 English](Next-Steps.md) | [🇪🇸 Español](Next-Steps_ES.md)
 
-Now that the core structure is in place, follow this roadmap to finalize the project for your portfolio.
+Roadmap updated for the current project state (desktop + agent_server).
 
-## Phase 1: Integration (Getting it Running)
+## Phase 1: Operational Stability
 
-- [ ] **Install Dependencies on Local Machine**
-      Run `pip install -r requirements.txt` in this directory.
+- [ ] Add automated tests for `/chat` (`step/chunk/error/done` paths).
+- [ ] Add tests for `web_search` fallback (no results and provider errors).
+- [ ] Add baseline metrics (latency, endpoint errors, tool failures).
+- [ ] Implement `agent_server.log` rotation.
 
-- [ ] **Setup Ollama**
-  - Install Ollama.
-  - Run `ollama pull qwen2.5-coder:14b`.
-  - Ensure it listens on port 11434.
+## Phase 2: Agent and Tools
 
-- [ ] **Configure n8n**
-  - Import `n8n_workflow.json` into your local n8n instance.
-  - Setup the Ollama Credentials (Base URL: `http://localhost:11434` or `http://host.docker.internal:11434`).
-  - Set up the Supabase credentials in n8n.
+- [ ] Improve Windows command policy (context-aware allowlists + audit trail).
+- [ ] Add granular confirmations by operation type (filesystem, network, processes).
+- [ ] Add source/citation handling for research responses using `web_search`.
+- [ ] Add additional configurable web-search backend (e.g., SerpAPI/Bing).
 
-- [ ] **Test the Loop**
-  - Trigger the n8n workflow manually.
-  - Verify it correctly calls the `get_system_stats` tool from your running `mcp_server.py`.
+## Phase 3: Chat UX
 
-## Phase 2: Technical Enhancements (The "Senior" Features)
+- [ ] Show tool-failure reason with expandable technical details in UI.
+- [ ] Add message edit history (lightweight versioning).
+- [ ] Accessibility improvements (focus states, shortcuts, screen reader support).
 
-- [ ] **Real GPU Monitoring**
-      Currently `mcp_server.py` uses simulated data for `gpu_stats`.
-  - **Action**: Modify `get_system_stats` to use `shutil.which('nvidia-smi')` and run the command to get real VRAM usage.
-  - _Why_: Shows you can handle real hardware interop.
+## Phase 4: Distribution
 
-- [ ] **Implement Vector Storage (RAG)**
-  - **Action**: Create a Python script (or n8n workflow) that:
-    1. Reads PDFs from `UNLZ-AI-STUDIO/system/data`.
-    2. Chunks them.
-    3. Generates embeddings (use Qwen or a small embedding model).
-    4. Upserts them to Supabase `vector` table.
-  - _Why_: Essential for the "Research" part of the agent.
+- [ ] CI pipeline for portable builds (`build-portable.ps1`) with versioned artifacts.
+- [ ] Binary signing for Windows distribution.
+- [ ] Reproducible release guide (checklist + semantic versioning).
 
-- [ ] **Add "Search" Tool**
-  - **Action**: Add a new tool to `mcp_server.py` called `search_local_files(query: str)`.
-  - It should filter the file list or grep contents to find relevant files before reading them.
+## Phase 5: Documentation
 
-## Phase 3: Portfolio Polish (The Presentation)
-
-- [ ] **Record a Demo Video**
-  - Screen record a full flow:
-    1. You asking: "How is the server load?" -> Agent checks MCP -> Returns real stats.
-    2. You asking: "Summarize the research on X" -> Agent checks Supabase -> Returns answer.
-  - Upload to YouTube/Loom and embed in `README.md`.
-
-- [ ] **Push to GitHub**
-  - `git push origin master`
+- [ ] Keep API docs synchronized by version.
+- [ ] Add a dedicated "breaking changes" section between legacy and desktop modes.
+- [ ] Publish sequence diagrams for chat + tools + SSE flow.
