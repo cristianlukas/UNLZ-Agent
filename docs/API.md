@@ -30,6 +30,7 @@ Request body:
   "history": [{ "role": "user|assistant", "content": "..." }],
   "system_prompt": "optional behavior prompt",
   "folder_id": "optional folder scope id",
+  "sandbox_root": "optional folder sandbox root path",
   "mode": "normal|plan|iterate",
   "conversation_id": "optional stable id for memory/snapshots",
   "dry_run": false
@@ -45,6 +46,14 @@ SSE event payloads (`data: {...}`):
 - `{"type":"error","text":"error message"}`
 - `{"type":"done"}`
 
+When a command requires confirmation in `AGENT_EXECUTION_MODE=confirm`, chat stream emits:
+- `{"type":"step","text":"command_confirmation_required","args":{"command":"...","cwd":"...","idempotency_key":"..."}}`
+
+Sandbox behavior for `run_windows_command`:
+- if `sandbox_root` is configured for the folder, command execution is constrained to that directory
+- explicit paths outside sandbox are blocked (`blocked_sandbox`)
+- if no sandbox is configured, backend asks explicit confirmation before execution (`needs_confirmation`)
+
 Mode behavior:
 - `normal`: standard tool-calling loop
 - `plan`: planning only (alternatives + final decision prompt)
@@ -55,13 +64,30 @@ Mode behavior:
 ## Knowledge Base (Global)
 
 ### `GET /files`
-Lists files under `data/`.
+Lists user-facing Knowledge Base files under `data/`.
+Internal runtime artifacts are excluded (for example `task_router.json`, `router_metrics.jsonl`, telemetry logs, and hidden dot-files).
 
 ### `POST /upload`
 Uploads a file into `data/`.
 
 ### `POST /ingest`
 Triggers RAG ingestion (`rag_pipeline.ingest.ingest_documents`).
+
+## Command Approval Actions
+
+### `POST /actions/run_windows_command`
+Executes a previously proposed command as an explicit user-approved action (used by confirmation cards in UI).
+
+Request body:
+```json
+{
+  "command": "New-Item ...",
+  "cwd": "C:\\Users\\...",
+  "sandbox_root": "C:\\Users\\...\\project",
+  "timeout_sec": 60,
+  "idempotency_key": "optional"
+}
+```
 
 ## Folder-Scoped Documents
 
@@ -90,6 +116,22 @@ Returns full persisted trace for one run (events, mode, metadata).
 Returns aggregated connector metrics:
 - web-search providers (latency/error rates)
 - tool runtime metrics (latency/error rates)
+
+### `GET /router/config`
+Returns current task-router configuration (`areas`, winner model, fallbacks, keywords, profile).
+
+### `POST /router/config`
+Replaces task-router configuration.
+
+### `GET /router/metrics`
+Returns live summary of routing quality by area/model:
+- calls
+- success rate
+- avg latency
+- avg retries
+
+### `POST /router/recalibrate`
+Recomputes winners from historical metrics and updates primary/fallback models when enough samples exist.
 
 ### `GET /snapshots`
 Lists snapshot metadata for resumable multi-session tasks.
@@ -148,7 +190,14 @@ Notable behavior:
 - when web search is unavailable, backend emits explicit failure text
 - in folder-scoped chat, `search_local_knowledge` is excluded and folder docs are preferred
 - Windows command execution mode is controlled by `AGENT_EXECUTION_MODE`
+- In `confirm` mode, UI shows approval cards (`Ejecutar` / `Rechazar`) from `command_confirmation_required` events
+- Folder sandbox is enforced when provided (`sandbox_root`); commands outside it are blocked
 - tool execution has typed contract validation + retry hints
 - mutating tools support idempotency keys and dry-run
 - policy engine (`AGENT_POLICY_FILESYSTEM|NETWORK|PROCESS|SYSTEM=allow|confirm|deny`)
 - runtime guardrails: max iterations, max tool calls, wall-time and per-tool timeout
+- task router:
+  - automatic area classification (keywords/intention)
+  - model routing by area
+  - fallback model chain per request
+  - metric logging + recalibration loop

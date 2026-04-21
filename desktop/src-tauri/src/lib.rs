@@ -363,7 +363,9 @@ pub fn run() {
                 }
             }
             #[cfg(windows)]
-            refresh_windows_shortcut_and_icon_cache();
+            if !cfg!(debug_assertions) {
+                refresh_windows_shortcut_and_icon_cache();
+            }
             let tray_menu = MenuBuilder::new(app)
                 .text("show", "Mostrar")
                 .text("quit", "Salir")

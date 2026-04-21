@@ -1,0 +1,3 @@
+{"ts": "2026-04-21T16:40:52", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": false, "latency_ms": 12024, "retries": 0, "mode": "normal", "reason": "keyword default"}
+{"ts": "2026-04-21T16:49:49", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": false, "latency_ms": 12745, "retries": 0, "mode": "normal", "reason": "keyword default"}
+{"ts": "2026-04-21T17:08:22", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": false, "latency_ms": 56477, "retries": 0, "mode": "normal", "reason": "keyword default"}

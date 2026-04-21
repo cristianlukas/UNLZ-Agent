@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { streamChat } from "../lib/api";
+import { getSettings, runApprovedWindowsCommand, saveSettings, streamChat } from "../lib/api";
 import type { AgentStep, ChatMessage } from "../lib/types";
 import { useStore, useActiveConv, useActiveBehavior, useActiveFolder } from "../lib/store";
 import unlzLogo from "../assets/unlz-logo.png";
@@ -23,14 +23,118 @@ const TOOL_ICONS: Record<string, string> = {
   list_knowledge_base_files: "📁",
   search_folder_documents: "📂",
   run_windows_command: "🖥️",
+  command_confirmation_required: "🛂",
+  command_confirmation_resolved: "✅",
 };
 
+type PendingCommandApproval = {
+  command: string;
+  cwd: string;
+  sandbox_root?: string;
+  idempotency_key?: string;
+  operation_class?: string;
+  mode?: string;
+  reason?: string;
+};
+
+function inferCommandLanguage(command: string): string {
+  const c = (command || "").toLowerCase();
+  if (!c.trim()) return "text";
+  if (
+    c.includes("new-item") ||
+    c.includes("set-content") ||
+    c.includes("get-childitem") ||
+    c.includes("powershell") ||
+    c.includes("$folderpath")
+  ) return "powershell";
+  if (c.includes("#!/bin/bash") || c.includes("mkdir -p") || c.includes("chmod +x")) return "bash";
+  if (c.includes("def ") || c.includes("import ") || c.includes("print(")) return "python";
+  if (c.includes("function ") || c.includes("console.log(") || c.includes("=>")) return "javascript";
+  return "text";
+}
+
+function extractPendingCommandApproval(msg: ChatMessage): PendingCommandApproval | null {
+  const steps = msg.steps ?? [];
+  const resolved = steps.some((s) => s.tool === "command_confirmation_resolved");
+  if (resolved) return null;
+  const step = [...steps].reverse().find((s) => s.tool === "command_confirmation_required");
+  if (!step?.args) return null;
+  const command = String(step.args.command ?? "").trim();
+  if (!command) return null;
+  return {
+    command,
+    cwd: String(step.args.cwd ?? "").trim(),
+    sandbox_root: String(step.args.sandbox_root ?? "").trim() || undefined,
+    idempotency_key: String(step.args.idempotency_key ?? "").trim() || undefined,
+    operation_class: String(step.args.operation_class ?? "").trim() || undefined,
+    mode: String(step.args.mode ?? "").trim() || undefined,
+    reason: String(step.args.reason ?? "").trim() || undefined,
+  };
+}
+
+function summarizeCommandAction(result: {
+  status: string;
+  command?: string;
+  returncode?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  reason?: string;
+  timeout_sec?: number;
+}): { summary: string; details?: string } {
+  const command = String(result.command ?? "").trim();
+  const status = result.status ?? "error";
+  if (status === "executed") {
+    const rc = Number(result.returncode ?? 0);
+    if (rc === 0) {
+      const out = String(result.stdout ?? "").trim();
+      const err = String(result.stderr ?? "").trim();
+      const details = [
+        `Comando: ${command || "(sin comando)"}`,
+        `Return code: ${rc}`,
+        out ? `STDOUT:\n${out}` : "",
+        err ? `STDERR:\n${err}` : "",
+      ].filter(Boolean).join("\n\n");
+      return { summary: "Acción ejecutada correctamente.", details };
+    }
+    const err = String(result.stderr ?? "").trim();
+    const out = String(result.stdout ?? "").trim();
+    const details = [
+      `Comando: ${command || "(sin comando)"}`,
+      `Return code: ${rc}`,
+      out ? `STDOUT:\n${out}` : "",
+      err ? `STDERR:\n${err}` : "",
+    ].filter(Boolean).join("\n\n");
+    return { summary: `El comando finalizó con código ${rc}.`, details };
+  }
+  if (status === "timeout") {
+    return {
+      summary: `El comando superó el tiempo límite (${result.timeout_sec ?? "?"}s).`,
+      details: `Comando: ${command || "(sin comando)"}`,
+    };
+  }
+  if (status === "blocked" || status === "blocked_policy") {
+    return {
+      summary: "El comando fue bloqueado por política.",
+      details: `Razón: ${result.reason ?? "no disponible"}.`,
+    };
+  }
+  return {
+    summary: `No pude ejecutar el comando: ${result.error ?? status}.`,
+    details: command ? `Comando: ${command}` : undefined,
+  };
+}
+
 function ToolStep({ step }: { step: AgentStep }) {
+  if (step.tool === "command_confirmation_required" || step.tool === "command_confirmation_resolved") {
+    return null;
+  }
+  const hideArgs = step.tool === "run_windows_command";
   return (
     <div className="flex items-center gap-1.5 text-[11px] text-muted italic py-0.5 animate-fadeIn">
       <span>{TOOL_ICONS[step.tool] ?? "🔧"}</span>
       <span className="text-secondary">{step.tool.replace(/_/g, " ")}</span>
-      {step.args && Object.keys(step.args).length > 0 && (
+      {!hideArgs && step.args && Object.keys(step.args).length > 0 && (
         <span className="text-border truncate max-w-[200px]">
           — {String(Object.values(step.args)[0])}
         </span>
@@ -46,13 +150,25 @@ function Message({
   isStreaming,
   onEdit,
   canEdit,
+  onApproveCommand,
+  onRejectCommand,
+  onSuggestCommandEdit,
+  commandBusy,
 }: {
   msg: ChatMessage;
   isStreaming: boolean;
   onEdit?: () => void;
   canEdit?: boolean;
+  onApproveCommand?: (msg: ChatMessage, payload: PendingCommandApproval) => void;
+  onRejectCommand?: (msg: ChatMessage, payload: PendingCommandApproval) => void;
+  onSuggestCommandEdit?: (msg: ChatMessage, payload: PendingCommandApproval, suggestion: string) => void;
+  commandBusy?: boolean;
 }) {
   const isUser = msg.role === "user";
+  const pendingApproval = !isUser ? extractPendingCommandApproval(msg) : null;
+  const [showTechnical, setShowTechnical] = useState(false);
+  const [showSuggestInput, setShowSuggestInput] = useState(false);
+  const [suggestionText, setSuggestionText] = useState("");
 
   if (isUser) {
     return (
@@ -147,6 +263,89 @@ function Message({
             <p className="mt-2 text-[10px] text-muted">Confianza estimada: {(msg.confidence * 100).toFixed(0)}%</p>
           )}
         </div>
+        {msg.technicalDetails && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowTechnical((p) => !p)}
+              className="btn-ghost text-[11px] px-2 py-1"
+            >
+              {showTechnical ? "Ocultar detalle técnico" : "Ver detalle técnico"}
+            </button>
+            {showTechnical && (
+              <pre className="mt-2 text-[11px] whitespace-pre-wrap break-words bg-base border border-border rounded-lg p-2 text-secondary">
+                {msg.technicalDetails}
+              </pre>
+            )}
+          </div>
+        )}
+        {pendingApproval && (
+          <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-xs text-amber-200 font-medium">Confirmación requerida</p>
+            <div className="mt-2 border border-border rounded-lg overflow-hidden">
+              <SyntaxHighlighter
+                style={oneDark as never}
+                language={inferCommandLanguage(pendingApproval.command)}
+                PreTag="div"
+                customStyle={{ margin: 0, borderRadius: 0, fontSize: "0.73rem", background: "#0b1022" }}
+              >
+                {pendingApproval.command}
+              </SyntaxHighlighter>
+            </div>
+            <p className="text-[11px] text-muted mt-1">Directorio: <code>{pendingApproval.cwd || "~"}</code></p>
+            {pendingApproval.sandbox_root && (
+              <p className="text-[11px] text-muted mt-1">Sandbox: <code>{pendingApproval.sandbox_root}</code></p>
+            )}
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                disabled={!!commandBusy || isStreaming}
+                onClick={() => onApproveCommand?.(msg, pendingApproval)}
+                className="btn-primary text-xs px-2.5 py-1.5 disabled:opacity-40"
+              >
+                {commandBusy ? "Ejecutando..." : "Ejecutar"}
+              </button>
+              <button
+                disabled={!!commandBusy || isStreaming}
+                onClick={() => onRejectCommand?.(msg, pendingApproval)}
+                className="btn-ghost text-xs px-2.5 py-1.5 border-red-900/40 text-red-300 disabled:opacity-40"
+              >
+                Rechazar
+              </button>
+              <button
+                disabled={!!commandBusy || isStreaming}
+                onClick={() => setShowSuggestInput((p) => !p)}
+                className="btn-ghost text-xs px-2.5 py-1.5 disabled:opacity-40"
+              >
+                Sugerir edición
+              </button>
+            </div>
+            {showSuggestInput && (
+              <div className="mt-2 space-y-2">
+                <textarea
+                  value={suggestionText}
+                  onChange={(e) => setSuggestionText(e.target.value)}
+                  rows={3}
+                  placeholder="Indicá cómo querés mejorar esta propuesta..."
+                  className="w-full bg-base border border-border rounded-lg px-2.5 py-2 text-xs text-primary outline-none focus:border-accent/50"
+                />
+                <div className="flex justify-end">
+                  <button
+                    disabled={!!commandBusy || isStreaming || !suggestionText.trim()}
+                    onClick={() => {
+                      const s = suggestionText.trim();
+                      if (!s) return;
+                      onSuggestCommandEdit?.(msg, pendingApproval, s);
+                      setSuggestionText("");
+                      setShowSuggestInput(false);
+                    }}
+                    className="btn-primary text-xs px-2.5 py-1.5 disabled:opacity-40"
+                  >
+                    Enviar sugerencia
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         {canEdit && onEdit && (
           <button
             onClick={onEdit}
@@ -303,6 +502,9 @@ function ActiveChat({ convId }: { convId: string }) {
   const [iteratorMode, setIteratorMode] = useState(false);
   const [planArmed, setPlanArmed] = useState(false);
   const [planWorkflowActive, setPlanWorkflowActive] = useState(false);
+  const [commandBusyByMsgId, setCommandBusyByMsgId] = useState<Record<string, boolean>>({});
+  const [autonomousExec, setAutonomousExec] = useState(false);
+  const [execModeBusy, setExecModeBusy] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -358,6 +560,20 @@ function ActiveChat({ convId }: { convId: string }) {
     }, 0);
   }, [convId, scrollToBottom, consumePendingDraft]);
 
+  useEffect(() => {
+    let cancelled = false;
+    getSettings()
+      .then((cfg) => {
+        if (cancelled) return;
+        const mode = String(cfg.AGENT_EXECUTION_MODE ?? "confirm").trim().toLowerCase();
+        setAutonomousExec(mode === "autonomous");
+      })
+      .catch(() => {
+        if (!cancelled) setAutonomousExec(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   function setConversationMessages(nextMessages: ChatMessage[]) {
     useStore.setState((s) => ({
       conversations: s.conversations.map((c) =>
@@ -390,6 +606,7 @@ function ActiveChat({ convId }: { convId: string }) {
         historyForModel,
         buildSystemPrompt(),
         conv?.folderId,
+        activeFolder?.sandboxPath,
         mode,
         convId,
         false
@@ -458,6 +675,118 @@ function ActiveChat({ convId }: { convId: string }) {
     }
 
     setIsStreaming(false);
+  }
+
+  function markCommandDecision(msgId: string, decision: "approved" | "rejected" | "suggest_edit") {
+    const current = useStore.getState().conversations
+      .find((c) => c.id === convId)
+      ?.messages.find((m) => m.id === msgId);
+    if (!current) return;
+    const steps = [...(current.steps ?? [])];
+    steps.push({ tool: "command_confirmation_resolved", args: { decision } });
+    upsertMessage(convId, { ...current, steps });
+  }
+
+  async function handleApproveCommand(msg: ChatMessage, payload: PendingCommandApproval) {
+    setCommandBusyByMsgId((prev) => ({ ...prev, [msg.id]: true }));
+    const userMsg: ChatMessage = {
+      id: uid(),
+      role: "user",
+      content: "✅ Ejecutar seleccionado",
+      ts: Date.now(),
+    };
+    upsertMessage(convId, userMsg);
+
+    const assistantId = uid();
+    upsertMessage(convId, {
+      id: assistantId,
+      role: "assistant",
+      content: "Ejecutando comando aprobado...",
+      ts: Date.now(),
+    });
+
+    try {
+      const result = await runApprovedWindowsCommand({
+        command: payload.command,
+        cwd: payload.cwd,
+        sandbox_root: payload.sandbox_root,
+        idempotency_key: payload.idempotency_key,
+      });
+      const view = summarizeCommandAction(result);
+      upsertMessage(convId, {
+        id: assistantId,
+        role: "assistant",
+        content: view.summary,
+        technicalDetails: view.details,
+        ts: Date.now(),
+      });
+      markCommandDecision(msg.id, "approved");
+    } catch (e) {
+      upsertMessage(convId, {
+        id: assistantId,
+        role: "assistant",
+        content: `No pude ejecutar el comando aprobado: ${e}`,
+        error: true,
+        ts: Date.now(),
+      });
+    } finally {
+      setCommandBusyByMsgId((prev) => ({ ...prev, [msg.id]: false }));
+    }
+  }
+
+  function handleRejectCommand(msg: ChatMessage, payload: PendingCommandApproval) {
+    const userMsg: ChatMessage = {
+      id: uid(),
+      role: "user",
+      content: "❌ Rechazar seleccionado",
+      ts: Date.now(),
+    };
+    upsertMessage(convId, userMsg);
+    upsertMessage(convId, {
+      id: uid(),
+      role: "assistant",
+      content: "Acción cancelada por el usuario. No ejecuté el comando.",
+      ts: Date.now(),
+    });
+    markCommandDecision(msg.id, "rejected");
+  }
+
+  async function handleSuggestCommandEdit(msg: ChatMessage, _payload: PendingCommandApproval, suggestion: string) {
+    const userMsg: ChatMessage = {
+      id: uid(),
+      role: "user",
+      content: "✏️ Sugerir edición seleccionado",
+      ts: Date.now(),
+    };
+    upsertMessage(convId, userMsg);
+    markCommandDecision(msg.id, "suggest_edit");
+
+    const prompt = [
+      "Replanteá la propuesta de comando anterior incorporando la sugerencia del usuario.",
+      "Mantené el objetivo original y devolvé una nueva propuesta ejecutable.",
+      "Luego pedí confirmación en chat antes de ejecutar.",
+      `Sugerencia: ${suggestion}`,
+    ].join("\n\n");
+
+    const history = useStore.getState().conversations
+      .find((c) => c.id === convId)
+      ?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
+
+    await streamAssistantReply(prompt, history, "normal");
+  }
+
+  async function handleToggleExecutionMode() {
+    if (execModeBusy) return;
+    const next = !autonomousExec;
+    setExecModeBusy(true);
+    try {
+      await saveSettings({
+        AGENT_EXECUTION_MODE: next ? "autonomous" : "confirm",
+      });
+      setAutonomousExec(next);
+    } finally {
+      setExecModeBusy(false);
+    }
   }
 
   function handleScroll() {
@@ -684,6 +1013,10 @@ function ActiveChat({ convId }: { convId: string }) {
                 isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
                 canEdit={!isStreaming}
                 onEdit={() => startEdit(msg)}
+                onApproveCommand={handleApproveCommand}
+                onRejectCommand={handleRejectCommand}
+                onSuggestCommandEdit={handleSuggestCommandEdit}
+                commandBusy={!!commandBusyByMsgId[msg.id]}
               />
             )
           ))
@@ -726,6 +1059,23 @@ function ActiveChat({ convId }: { convId: string }) {
             title="Modo agente iterador"
           >
             Iterador
+          </button>
+          <button
+            onClick={handleToggleExecutionMode}
+            aria-pressed={autonomousExec}
+            disabled={execModeBusy}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
+              autonomousExec
+                ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/15"
+                : "border-border text-muted hover:text-primary hover:bg-surface-2"
+            }`}
+            title="Activa o desactiva ejecutar sin preguntar"
+          >
+            {execModeBusy
+              ? "Actualizando..."
+              : autonomousExec
+                ? "Sin preguntar"
+                : "Preguntar antes"}
           </button>
           {planWorkflowActive && (
             <>

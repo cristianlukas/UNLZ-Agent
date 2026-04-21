@@ -65,6 +65,13 @@ Thumbs.db
 # Local runtime / cache
 agent_server.log
 *.pid
+data/task_router.json
+data/router_metrics.jsonl
+data/telemetry.jsonl
+data/memory.jsonl
+data/runs/
+data/snapshots/
+data/folders/
 
 # Keep only source assets under desktop/src/assets
 desktop/src/assets/*.tmp

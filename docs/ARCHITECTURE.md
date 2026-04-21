@@ -66,6 +66,7 @@ Folders (UI/store level):
 - can define:
   - `behaviorId` (base behavior)
   - `customPrompt`
+  - `sandboxPath` (project working directory / sandbox root)
 - can store folder-exclusive documents under:
   - `data/folders/<folder_id>/...`
 
@@ -84,6 +85,14 @@ Conversation prompt composition:
 - execution mode via `AGENT_EXECUTION_MODE`:
   - `confirm`
   - `autonomous`
+- `confirm` mode UX:
+  - backend emits `command_confirmation_required` step event
+  - chat renders action cards (`Ejecutar`, `Rechazar`)
+  - approved action executes via `POST /actions/run_windows_command` (explicit user intent)
+- sandbox enforcement:
+  - if folder has `sandboxPath`, command `cwd` defaults to that sandbox
+  - explicit command paths outside sandbox are blocked (`blocked_sandbox`)
+  - if no sandbox exists for the folder, backend requires explicit approval before execution
 - policy classes via env:
   - `AGENT_POLICY_FILESYSTEM`
   - `AGENT_POLICY_NETWORK`
@@ -103,12 +112,42 @@ Conversation prompt composition:
 - Snapshots: `data/snapshots/<conversation_id>.json`
   - used by iterate mode checkpoints/resume
 
+## Task Router (Area-Based Model Routing)
+
+- Config: `data/.unlz_internal/task_router.json` (legacy `data/task_router.json` auto-migrated)
+- Runtime metric log: `data/.unlz_internal/router_metrics.jsonl` (legacy `data/router_metrics.jsonl` auto-migrated)
+- Router flow:
+  - classify task area from user request
+  - pick area winner model (`primary_model`)
+  - execute fallback chain (`fallback_models`) on provider/model failure
+  - persist success/latency/retry metrics
+  - optional periodic recalibration based on observed metrics
+
+Default seeded areas:
+- `notificaciones`
+- `resumen_asignacion`
+- `metadata`
+- `jurisdiccion`
+- `ocr`
+- `rag`
+- `chat_general`
+- `docgen_informe`
+- `vlm`
+
+Desktop Settings support for task router:
+- search/filter areas
+- create/delete areas from UI
+- edit per-area primary/fallback/profile/keywords
+- read-only global metrics table with sortable columns and pagination
+- local UI persistence for metrics table sort and page size (localStorage)
+
 ## Connector Health and Telemetry
 
 - `/connectors/health` surfaces provider/tool latency and error rates.
 - Optional telemetry (opt-in):
   - `AGENT_TELEMETRY_OPT_IN=true`
   - writes structured events to `data/telemetry.jsonl`.
+- Knowledge Base listing (`GET /files`) only exposes user-document extensions and hides internal files (router/metrics/telemetry).
 
 ## Window Controls UX
 

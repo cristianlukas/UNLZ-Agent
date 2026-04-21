@@ -595,6 +595,66 @@ _CONNECTOR_METRICS: dict[str, Any] = {
     "tools": {},
 }
 
+_TASK_ROUTER_DEFAULT = {
+    "version": 1,
+    "areas": {
+        "notificaciones": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["notificacion", "cedula", "juzgado", "expediente", "traslado", "proveido"],
+        },
+        "resumen_asignacion": {
+            "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+            "fallback_models": ["gemma-3-4b-it-q4_0"],
+            "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+            "keywords": ["resumen", "asignacion", "pendiente", "situacion", "estado actual"],
+        },
+        "metadata": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["metadata", "campos", "normalizar", "partes", "dominio", "monto", "hechos"],
+        },
+        "jurisdiccion": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["jurisdiccion", "fuero", "camara", "competencia", "procesal"],
+        },
+        "ocr": {
+            "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+            "fallback_models": ["gemma-3-4b-it-q4_0"],
+            "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+            "keywords": ["ocr", "scan", "escaneado", "texto sucio", "ilegible", "pdf imagen"],
+        },
+        "rag": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["rag", "fuentes", "base documental", "conocimiento local", "documentos"],
+        },
+        "chat_general": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["hola", "ayuda", "consulta", "explicame", "que podes hacer"],
+        },
+        "docgen_informe": {
+            "primary_model": "gemma-3-4b-it-q4_0",
+            "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
+            "profile": "gemma3_4b_q40_jsonfmt",
+            "keywords": ["informe", "docgen", "redacta", "borrador", "dictamen", "seccion"],
+        },
+        "vlm": {
+            "primary_model": "qwen2.5-vl:7b",
+            "fallback_models": ["gemma-3-4b-it-q4_0"],
+            "profile": "vlm_quality",
+            "keywords": ["imagen", "foto", "visual", "pagina escaneada", "clasificar pagina", "captura"],
+        },
+    },
+}
+
 
 def _telemetry_enabled() -> bool:
     raw = (os.getenv("AGENT_TELEMETRY_OPT_IN", "false") or "false").strip().lower()
@@ -617,6 +677,246 @@ def _emit_telemetry(event: str, payload: dict) -> None:
     }
     with _telemetry_path().open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def _task_router_path() -> Path:
+    data_dir = Path(Config.DATA_DIR)
+    internal_dir = data_dir / ".unlz_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
+    p = internal_dir / "task_router.json"
+    legacy = data_dir / "task_router.json"
+    if legacy.exists() and not p.exists():
+        try:
+            legacy.replace(p)
+        except Exception:
+            try:
+                p.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+                legacy.unlink(missing_ok=True)
+            except Exception:
+                pass
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _load_task_router() -> dict:
+    p = _task_router_path()
+    if not p.exists():
+        p.write_text(json.dumps(_TASK_ROUTER_DEFAULT, ensure_ascii=False, indent=2), encoding="utf-8")
+        return json.loads(json.dumps(_TASK_ROUTER_DEFAULT))
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("areas"), dict):
+            raise ValueError("invalid task router shape")
+        return data
+    except Exception:
+        p.write_text(json.dumps(_TASK_ROUTER_DEFAULT, ensure_ascii=False, indent=2), encoding="utf-8")
+        return json.loads(json.dumps(_TASK_ROUTER_DEFAULT))
+
+
+def _save_task_router(data: dict) -> None:
+    _task_router_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _classify_task_area(message: str, mode: str = "normal") -> tuple[str, float, str]:
+    router = _load_task_router()
+    areas = router.get("areas", {})
+    text = (message or "").lower()
+    if mode == "plan":
+        return "chat_general", 0.6, "mode=plan"
+    if mode == "iterate":
+        return "resumen_asignacion", 0.6, "mode=iterate"
+
+    best_area = "chat_general"
+    best_score = 0
+    for area, cfg in areas.items():
+        kws = cfg.get("keywords") or []
+        score = 0
+        for kw in kws:
+            if not isinstance(kw, str):
+                continue
+            if kw.lower() in text:
+                score += 1
+        if score > best_score:
+            best_area = area
+            best_score = score
+    confidence = min(0.95, 0.35 + (best_score * 0.15))
+    if best_score <= 0:
+        return "chat_general", 0.35, "keyword default"
+    return best_area, round(confidence, 2), f"keyword matches={best_score}"
+
+
+def _resolve_task_route(area: str) -> dict:
+    router = _load_task_router()
+    areas = router.get("areas", {})
+    cfg = areas.get(area) or areas.get("chat_general") or {}
+    return {
+        "area": area if area in areas else "chat_general",
+        "primary_model": str(cfg.get("primary_model") or ""),
+        "fallback_models": [str(x) for x in (cfg.get("fallback_models") or []) if str(x).strip()],
+        "profile": str(cfg.get("profile") or ""),
+    }
+
+
+def _build_model_chain(base_model: str, route: dict) -> list[str]:
+    chain: list[str] = []
+    for m in [route.get("primary_model"), *(route.get("fallback_models") or []), base_model]:
+        mm = str(m or "").strip()
+        if mm and mm not in chain:
+            chain.append(mm)
+    return chain or [base_model]
+
+
+def _router_metrics_path() -> Path:
+    data_dir = Path(Config.DATA_DIR)
+    internal_dir = data_dir / ".unlz_internal"
+    internal_dir.mkdir(parents=True, exist_ok=True)
+    p = internal_dir / "router_metrics.jsonl"
+    legacy = data_dir / "router_metrics.jsonl"
+    if legacy.exists() and not p.exists():
+        try:
+            legacy.replace(p)
+        except Exception:
+            try:
+                p.write_text(legacy.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+                legacy.unlink(missing_ok=True)
+            except Exception:
+                pass
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _is_visible_knowledge_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    name = (path.name or "").strip().lower()
+    if not name:
+        return False
+    if name.startswith("."):
+        return False
+    blocked_names = {
+        "task_router.json",
+        "router_metrics.jsonl",
+        "telemetry.jsonl",
+    }
+    if name in blocked_names:
+        return False
+    allowed_ext = {
+        ".pdf",
+        ".txt",
+        ".md",
+        ".doc",
+        ".docx",
+        ".rtf",
+        ".csv",
+        ".tsv",
+    }
+    return path.suffix.lower() in allowed_ext
+
+
+def _record_router_metric(area: str, model: str, success: bool, latency_ms: int, retries: int, mode: str, reason: str = "") -> None:
+    rec = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "area": area,
+        "model": model,
+        "success": bool(success),
+        "latency_ms": int(latency_ms),
+        "retries": int(retries),
+        "mode": mode,
+        "reason": reason[:300],
+    }
+    with _router_metrics_path().open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    auto = (os.getenv("TASK_ROUTER_AUTO_RECALIBRATE", "false") or "false").strip().lower() in ("1", "true", "yes")
+    if not auto:
+        return
+    interval = max(20, int(os.getenv("TASK_ROUTER_RECALIBRATE_INTERVAL", "100")))
+    try:
+        total = sum(1 for _ in _router_metrics_path().open("r", encoding="utf-8", errors="ignore"))
+        if total % interval == 0:
+            _recalibrate_router(min_samples=max(8, int(os.getenv("TASK_ROUTER_MIN_SAMPLES", "12"))))
+    except Exception:
+        pass
+
+
+def _router_metrics_summary(limit: int = 5000) -> dict:
+    p = _router_metrics_path()
+    if not p.exists():
+        return {"total": 0, "areas": {}}
+    rows: list[dict] = []
+    for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
+        try:
+            rows.append(json.loads(raw))
+        except Exception:
+            continue
+    agg: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        area = str(r.get("area") or "chat_general")
+        model = str(r.get("model") or "unknown")
+        a = agg.setdefault(area, {})
+        m = a.setdefault(model, {"calls": 0, "ok": 0, "latency_total": 0, "retries_total": 0})
+        m["calls"] += 1
+        m["ok"] += 1 if r.get("success") else 0
+        m["latency_total"] += int(r.get("latency_ms") or 0)
+        m["retries_total"] += int(r.get("retries") or 0)
+    out_areas: dict[str, dict] = {}
+    for area, models in agg.items():
+        out_models: dict[str, dict] = {}
+        for model, stats in models.items():
+            calls = max(1, int(stats["calls"]))
+            out_models[model] = {
+                "calls": stats["calls"],
+                "success_rate": round(float(stats["ok"]) / calls, 3),
+                "avg_latency_ms": round(float(stats["latency_total"]) / calls, 1),
+                "avg_retries": round(float(stats["retries_total"]) / calls, 2),
+            }
+        out_areas[area] = out_models
+    return {"total": len(rows), "areas": out_areas}
+
+
+def _recalibrate_router(min_samples: int = 12) -> dict:
+    router = _load_task_router()
+    summary = _router_metrics_summary(limit=10000)
+    changes = []
+    for area, models in (summary.get("areas") or {}).items():
+        scored = []
+        for model, stats in (models or {}).items():
+            calls = int(stats.get("calls") or 0)
+            if calls < min_samples:
+                continue
+            success_rate = float(stats.get("success_rate") or 0.0)
+            latency = float(stats.get("avg_latency_ms") or 0.0)
+            score = success_rate - min(0.3, latency / 100000.0)
+            scored.append((score, model))
+        if not scored:
+            continue
+        scored.sort(reverse=True, key=lambda x: x[0])
+        best_model = scored[0][1]
+        if area in router.get("areas", {}):
+            prev = str(router["areas"][area].get("primary_model") or "")
+            if best_model and best_model != prev:
+                fallback = [prev] + [m for _, m in scored[1:4] if m != prev]
+                fallback = [m for m in fallback if m]
+                router["areas"][area]["primary_model"] = best_model
+                router["areas"][area]["fallback_models"] = fallback
+                changes.append({"area": area, "from": prev, "to": best_model})
+    if changes:
+        _save_task_router(router)
+    return {"changes": changes, "count": len(changes), "min_samples": min_samples}
+
+
+async def _chat_create_with_fallback(client, model_chain: list[str], **kwargs):
+    errors = []
+    retries = 0
+    for idx, m in enumerate(model_chain):
+        try:
+            resp = await client.chat.completions.create(model=m, **kwargs)
+            return resp, m, retries, errors
+        except Exception as e:
+            errors.append(f"{m}: {e}")
+            retries += 1
+            if idx >= len(model_chain) - 1:
+                break
+    raise RuntimeError(" | ".join(errors[:4]) or "llm call failed")
 
 
 def _record_web_provider(provider: str, ok: bool, latency_ms: int = 0, err: str = "") -> None:
@@ -669,9 +969,18 @@ class ChatRequest(BaseModel):
     history: list[dict] = []        # [{role, content}, ...]
     system_prompt: str = ""         # override default system prompt (from Behavior)
     folder_id: str = ""             # optional folder scope for folder-only docs
+    sandbox_root: str = ""          # optional folder sandbox path (enforced for command/file ops)
     mode: str = "normal"            # normal | plan | iterate
     conversation_id: str = ""
     dry_run: bool = False
+
+
+class CommandActionRequest(BaseModel):
+    command: str
+    cwd: str = ""
+    sandbox_root: str = ""
+    timeout_sec: int = Config.AGENT_COMMAND_TIMEOUT_SEC
+    idempotency_key: str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -922,6 +1231,78 @@ def _execution_mode() -> str:
     return mode if mode in ("confirm", "autonomous") else "confirm"
 
 
+def _normalize_path(p: str) -> str:
+    return os.path.abspath(os.path.expanduser(p or ""))
+
+
+def _is_path_within_base(path: str, base: str) -> bool:
+    try:
+        p = _normalize_path(path)
+        b = _normalize_path(base)
+        return os.path.commonpath([p, b]) == b
+    except Exception:
+        return False
+
+
+def _extract_command_paths(command: str) -> list[str]:
+    c = command or ""
+    out: list[str] = []
+    # Absolute Windows paths (quoted or unquoted), e.g. C:\foo\bar
+    for m in re.finditer(r"(?i)([a-z]:\\[^\s\"']+|[a-z]:\\[^\"']*)", c):
+        val = (m.group(1) or "").strip().strip("\"'")
+        if val:
+            out.append(val)
+    # Relative explicit paths, e.g. .\foo, ..\bar
+    for m in re.finditer(r"(?i)(\.\.?\\[^\s\"']+)", c):
+        val = (m.group(1) or "").strip().strip("\"'")
+        if val:
+            out.append(val)
+    # UNC paths
+    for m in re.finditer(r"(\\\\[^\s\"']+)", c):
+        val = (m.group(1) or "").strip().strip("\"'")
+        if val:
+            out.append(val)
+    # De-dup while preserving order
+    seen = set()
+    clean: list[str] = []
+    for p in out:
+        k = p.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        clean.append(p)
+    return clean
+
+
+def _sandbox_violation(command: str, cwd: str, sandbox_root: str) -> str | None:
+    if not sandbox_root:
+        return None
+
+    sb = _normalize_path(sandbox_root)
+    if not os.path.isdir(sb):
+        return f"Invalid sandbox_root: {sb}"
+    if not _is_path_within_base(cwd, sb):
+        return f"cwd outside sandbox: {cwd}"
+
+    c = command or ""
+    if "..\\" in c or "../" in c:
+        return "Parent path traversal is not allowed in sandbox mode."
+
+    # Block explicit drive switch tokens outside sandbox drive (e.g. 'D:' in command body).
+    sb_drive = os.path.splitdrive(sb)[0].lower()
+    drive_tokens = re.findall(r"(?i)\b([a-z]:)\b", c)
+    for d in drive_tokens:
+        if d.lower() != sb_drive:
+            return f"Drive switch outside sandbox drive is not allowed: {d}"
+
+    for p in _extract_command_paths(c):
+        # Relative explicit paths are resolved from cwd.
+        full = _normalize_path(os.path.join(cwd, p) if (p.startswith(".\\") or p.startswith("..\\")) else p)
+        if not _is_path_within_base(full, sb):
+            return f"Path outside sandbox detected: {p}"
+    return None
+
+
 def _run_windows_command(args: dict) -> str:
     command = str(args.get("command", "")).strip()
     if not command:
@@ -935,9 +1316,14 @@ def _run_windows_command(args: dict) -> str:
                 "command": command,
             }, ensure_ascii=False)
 
+    sandbox_root = str(args.get("sandbox_root") or "").strip()
+    sandbox_root = _normalize_path(sandbox_root) if sandbox_root else ""
+
     cwd = str(args.get("cwd") or "").strip()
     if cwd:
-        run_cwd = os.path.abspath(os.path.expanduser(cwd))
+        run_cwd = _normalize_path(cwd)
+    elif sandbox_root:
+        run_cwd = sandbox_root
     else:
         run_cwd = os.path.expanduser("~")
     if not os.path.isdir(run_cwd):
@@ -953,6 +1339,7 @@ def _run_windows_command(args: dict) -> str:
     max_output = max(500, int(os.getenv("AGENT_COMMAND_MAX_OUTPUT", str(Config.AGENT_COMMAND_MAX_OUTPUT))))
     op_class = _operation_class_for_command(command)
     mutating = op_class in ("filesystem", "process", "system")
+    approved = bool(args.get("approved", False))
 
     idem_key = str(args.get("idempotency_key") or "").strip()
     if not idem_key:
@@ -968,11 +1355,40 @@ def _run_windows_command(args: dict) -> str:
             "operation_class": op_class,
             "command": command,
             "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "would_execute": True,
         }, ensure_ascii=False)
         _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key] = result
         return result
+
+    # If no sandbox configured, force explicit user decision first.
+    if not sandbox_root and not approved:
+        return json.dumps({
+            "status": "needs_confirmation",
+            "mode": _execution_mode(),
+            "operation_class": op_class,
+            "command": command,
+            "cwd": run_cwd,
+            "sandbox_root": "",
+            "idempotency_key": idem_key,
+            "reason_key": "sandbox_not_configured",
+            "message": "No hay carpeta sandbox definida para esta conversación. Confirmá si querés ejecutar igualmente.",
+        }, ensure_ascii=False)
+
+    if sandbox_root:
+        violation = _sandbox_violation(command, run_cwd, sandbox_root)
+        if violation:
+            return json.dumps({
+                "status": "blocked_sandbox",
+                "operation_class": op_class,
+                "command": command,
+                "cwd": run_cwd,
+                "sandbox_root": sandbox_root,
+                "idempotency_key": idem_key,
+                "reason": violation,
+                "retry_hint": "Use rutas y operaciones dentro de la carpeta sandbox configurada para esta carpeta.",
+            }, ensure_ascii=False)
 
     decision, reason = _policy_decision(op_class, mutating)
     if decision == "deny":
@@ -980,22 +1396,25 @@ def _run_windows_command(args: dict) -> str:
             "status": "blocked_policy",
             "operation_class": op_class,
             "command": command,
+            "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "reason": reason,
             "retry_hint": "Request another operation or update policy settings.",
         }, ensure_ascii=False)
 
     mode = _execution_mode()
-    if mode == "confirm" or decision == "confirm":
+    if (mode == "confirm" or decision == "confirm") and not approved:
         return json.dumps({
             "status": "needs_confirmation",
             "mode": mode,
             "operation_class": op_class,
             "command": command,
+            "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "message": (
-                "Execution requires confirmation. Switch to autonomous mode "
-                "or update AGENT_POLICY_* for this operation class."
+                "Execution requires confirmation. Awaiting explicit user choice."
             ),
         }, ensure_ascii=False)
 
@@ -1019,6 +1438,7 @@ def _run_windows_command(args: dict) -> str:
             "operation_class": op_class,
             "command": command,
             "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "returncode": completed.returncode,
             "stdout": out,
@@ -1031,6 +1451,7 @@ def _run_windows_command(args: dict) -> str:
             "status": "timeout",
             "command": command,
             "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "timeout_sec": timeout_sec,
             "retry_hint": "Use a shorter command or increase timeout_sec.",
@@ -1042,6 +1463,8 @@ def _run_windows_command(args: dict) -> str:
             "status": "error",
             "error": str(e),
             "command": command,
+            "cwd": run_cwd,
+            "sandbox_root": sandbox_root,
             "idempotency_key": idem_key,
             "retry_hint": "Validate command syntax and working directory.",
         }, ensure_ascii=False)
@@ -1062,10 +1485,14 @@ def _summarize_windows_command_result(result_text: str) -> str:
         err = (data.get("stderr") or "").strip()
         return f"El comando terminó con código {rc}.\n\nComando: `{command}`\n\nError:\n```\n{err}\n```"
     if status == "needs_confirmation":
+        if str(data.get("reason_key") or "") == "sandbox_not_configured":
+            return (
+                "Esta conversación no tiene carpeta sandbox definida.\n\n"
+                "Confirmá si querés ejecutar igualmente o configurá la carpeta sandbox en `Carpetas`."
+            )
         return (
             "Modo de ejecución actual: `Preguntar antes de ejecutar`.\n\n"
-            "Para que lo ejecute automáticamente, cambiá en Configuración a `Agente autónomo` "
-            "y repetí la instrucción."
+            "Elegí una acción en las tarjetas de confirmación para continuar."
         )
     if status == "timeout":
         return f"El comando superó el tiempo límite.\n\nComando: `{command}`"
@@ -1073,6 +1500,8 @@ def _summarize_windows_command_result(result_text: str) -> str:
         return "El comando fue bloqueado por política de seguridad."
     if status == "blocked_policy":
         return f"El comando fue bloqueado por política.\n\nRazón: {data.get('reason', 'policy deny')}."
+    if status == "blocked_sandbox":
+        return f"El comando fue bloqueado por sandbox.\n\nRazón: {data.get('reason', 'ruta fuera de sandbox')}."
     if status == "dry_run":
         return f"Modo dry-run: no ejecuté el comando.\n\nComando: `{command}`"
     if status == "error":
@@ -1225,7 +1654,7 @@ def _verify_command_output(command: str, contains: str, cwd: str = "", timeout_s
     }, ensure_ascii=False)
 
 
-def execute_tool(name: str, args: dict, folder_id: str = "", dry_run: bool = False) -> str:
+def execute_tool(name: str, args: dict, folder_id: str = "", sandbox_root: str = "", dry_run: bool = False) -> str:
     started = time.perf_counter()
     ok = False
     last_err = ""
@@ -1301,6 +1730,8 @@ def execute_tool(name: str, args: dict, folder_id: str = "", dry_run: bool = Fal
             payload = dict(args)
             if dry_run and "dry_run" not in payload:
                 payload["dry_run"] = True
+            if sandbox_root and "sandbox_root" not in payload:
+                payload["sandbox_root"] = sandbox_root
             out = _run_windows_command(payload)
             try:
                 p = json.loads(out)
@@ -1396,7 +1827,7 @@ _PROMPTS = {
         "You have access to tools: local knowledge search (RAG), web search, time, system stats, and Windows terminal command execution. "
         "Do not claim you lack internet access. If the user asks to research/search online, you must call web_search. "
         "When the user asks you to perform an action on their machine, use run_windows_command instead of just explaining how. "
-        "If run_windows_command returns needs_confirmation, ask the user to switch execution mode to autonomous. "
+        "If run_windows_command returns needs_confirmation, ask the user to approve/reject using confirmation cards in chat. "
         "Use tools proactively to answer accurately. "
         "Format responses in Markdown. Be concise and precise."
     ),
@@ -1405,7 +1836,7 @@ _PROMPTS = {
         "Tenés acceso a herramientas: búsqueda de conocimiento local (RAG), búsqueda web, hora, stats del sistema y ejecución de comandos en terminal de Windows. "
         "No digas que no tenés acceso a internet: si el usuario pide investigar o buscar online, tenés que usar web_search. "
         "Cuando el usuario te pida realizar una acción en su máquina, usá run_windows_command en lugar de solo explicar pasos. "
-        "Si run_windows_command devuelve needs_confirmation, pedile al usuario cambiar el modo de ejecución a autonomous. "
+        "Si run_windows_command devuelve needs_confirmation, pedí al usuario aprobar o rechazar desde las tarjetas de confirmación del chat. "
         "Usá las herramientas proactivamente para responder con precisión. "
         "Formateá las respuestas en Markdown. Sé conciso y preciso."
     ),
@@ -1485,6 +1916,7 @@ async def _agent_stream_normal(
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
 ) -> AsyncGenerator[str, None]:
@@ -1501,6 +1933,9 @@ async def _agent_stream_normal(
         return
 
     client, model = _get_client()
+    task_area, route_conf, route_reason = _classify_task_area(message, mode="normal")
+    route = _resolve_task_route(task_area)
+    model_chain = _build_model_chain(model, route)
     limits = _agent_limits()
     started_at = time.time()
     tool_calls = 0
@@ -1510,6 +1945,9 @@ async def _agent_stream_normal(
     last_tool_result: str | None = None
     force_tools = _is_research_request(message) or _is_action_request(message)
     is_research = _is_research_request(message)
+    llm_retries_total = 0
+    model_used = model_chain[0]
+    yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
 
     prompt_text = _compose_system_prompt(system_prompt)
     messages: list[dict] = [{"role": "system", "content": prompt_text}]
@@ -1549,16 +1987,21 @@ async def _agent_stream_normal(
             break
 
         try:
-            resp = await client.chat.completions.create(
-                model=model,
+            resp, model_used, retries, _errors = await _chat_create_with_fallback(
+                client,
+                model_chain,
                 messages=messages,
                 tools=available_tools,
                 tool_choice="required" if (force_tools and iteration == 0) else "auto",
                 stream=False,
                 timeout=90,
             )
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM error: {e}'})}\n\n"
+            llm_retries_total += retries
+            if retries > 0:
+                yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used, 'retries': retries}})}\n\n"
+        except Exception as e2:
+            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM error: {e2}'})}\n\n"
+            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "normal", str(e2))
             return
 
         choices = getattr(resp, "choices", None)
@@ -1611,7 +2054,7 @@ async def _agent_stream_normal(
                 await asyncio.sleep(0)
                 try:
                     result = await asyncio.wait_for(
-                        loop.run_in_executor(None, execute_tool, fn, fn_args, folder_id, dry_run),
+                        loop.run_in_executor(None, execute_tool, fn, fn_args, folder_id, sandbox_root, dry_run),
                         timeout=float(limits["tool_timeout_sec"]),
                     )
                 except asyncio.TimeoutError:
@@ -1626,7 +2069,7 @@ async def _agent_stream_normal(
                     if fn == "web_search":
                         fallback_args = {"query": fn_args.get("query", message)}
                         yield f"data: {json.dumps({'type': 'step', 'text': 'fallback.search_local_knowledge', 'args': fallback_args})}\n\n"
-                        fb = await loop.run_in_executor(None, execute_tool, "search_local_knowledge", fallback_args, folder_id, dry_run)
+                        fb = await loop.run_in_executor(None, execute_tool, "search_local_knowledge", fallback_args, folder_id, sandbox_root, dry_run)
                         tool_calls += 1
                         last_tool_name = "search_local_knowledge"
                         last_tool_result = fb
@@ -1639,6 +2082,12 @@ async def _agent_stream_normal(
 
             if last_tool_name == "run_windows_command" and last_tool_result:
                 summary = _summarize_windows_command_result(last_tool_result)
+                try:
+                    cmd_data = json.loads(last_tool_result)
+                    if str(cmd_data.get("status") or "") == "needs_confirmation":
+                        yield f"data: {json.dumps({'type': 'step', 'text': 'command_confirmation_required', 'args': {'command': cmd_data.get('command', ''), 'cwd': cmd_data.get('cwd', ''), 'sandbox_root': cmd_data.get('sandbox_root', ''), 'idempotency_key': cmd_data.get('idempotency_key', ''), 'operation_class': cmd_data.get('operation_class', ''), 'mode': cmd_data.get('mode', ''), 'reason': cmd_data.get('message', ''), 'reason_key': cmd_data.get('reason_key', '')}})}\n\n"
+                except Exception:
+                    pass
                 final_chunks.append(summary)
                 yield f"data: {json.dumps({'type': 'chunk', 'text': summary})}\n\n"
                 emitted_final = True
@@ -1647,12 +2096,22 @@ async def _agent_stream_normal(
 
         try:
             emitted_any = False
-            stream = await client.chat.completions.create(
-                model=model,
+            stream, model_used, retries, _errors = await _chat_create_with_fallback(
+                client,
+                model_chain,
                 messages=messages,
                 stream=True,
                 timeout=120,
             )
+            llm_retries_total += retries
+            if retries > 0:
+                yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used, 'retries': retries}})}\n\n"
+        except Exception as e:
+            had_tool_errors = True
+            yield f"data: {json.dumps({'type': 'error', 'text': f'Stream error: {e}'})}\n\n"
+            emitted_final = True
+            break
+        try:
             async for chunk in stream:
                 chunk_choices = getattr(chunk, "choices", None)
                 if not chunk_choices:
@@ -1714,6 +2173,16 @@ async def _agent_stream_normal(
         except Exception:
             pass
 
+    _record_router_metric(
+        task_area,
+        model_used,
+        not had_tool_errors,
+        int((time.time() - started_at) * 1000),
+        llm_retries_total,
+        "normal",
+        route_reason,
+    )
+
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 async def _run_internal_agent_once(
@@ -1721,6 +2190,7 @@ async def _run_internal_agent_once(
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
 ) -> dict:
@@ -1728,7 +2198,7 @@ async def _run_internal_agent_once(
     steps: list[dict] = []
     error_text = ""
     confidence = None
-    async for raw in _agent_stream_normal(message, history, system_prompt, folder_id, conversation_id, dry_run):
+    async for raw in _agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run):
         if not raw.startswith("data: "):
             continue
         payload = raw[6:].strip()
@@ -1785,7 +2255,14 @@ async def _plan_stream(
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
         return
 
+    started_at = time.time()
     client, model = _get_client()
+    task_area, route_conf, route_reason = _classify_task_area(message, mode="plan")
+    route = _resolve_task_route(task_area)
+    model_chain = _build_model_chain(model, route)
+    model_used = model_chain[0]
+    llm_retries_total = 0
+    yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
     plan_protocol = (
         "Modo plan activo. Tu tarea es planificar antes de ejecutar.\n"
         "Reglas:\n"
@@ -1807,12 +2284,14 @@ async def _plan_stream(
     messages.append({"role": "user", "content": message})
 
     try:
-        stream = await client.chat.completions.create(
-            model=model,
+        stream, model_used, retries, _errors = await _chat_create_with_fallback(
+            client,
+            model_chain,
             messages=messages,
             stream=True,
             timeout=120,
         )
+        llm_retries_total += retries
         async for chunk in stream:
             ch = getattr(chunk, "choices", None)
             if not ch:
@@ -1824,7 +2303,11 @@ async def _plan_stream(
                 await asyncio.sleep(0)
     except Exception as e:
         yield f"data: {json.dumps({'type': 'error', 'text': f'Plan mode error: {e}'})}\n\n"
+        _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "plan", str(e))
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
 
+    _record_router_metric(task_area, model_used, True, int((time.time() - started_at) * 1000), llm_retries_total, "plan", route_reason)
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
@@ -1833,6 +2316,7 @@ async def _iterate_stream(
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
 ) -> AsyncGenerator[str, None]:
@@ -1845,7 +2329,14 @@ async def _iterate_stream(
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
         return
 
+    started_at = time.time()
     client, model = _get_client()
+    task_area, route_conf, route_reason = _classify_task_area(message, mode="iterate")
+    route = _resolve_task_route(task_area)
+    model_chain = _build_model_chain(model, route)
+    model_used = model_chain[0]
+    llm_retries_total = 0
+    yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
     sys_prompt = _compose_system_prompt(system_prompt)
     plan_req = (
         "Genera un plan de ejecucion en JSON puro con esta forma:\n"
@@ -1857,12 +2348,14 @@ async def _iterate_stream(
     objective = message
 
     try:
-        plan_resp = await client.chat.completions.create(
-            model=model,
+        plan_resp, model_used, retries, _errors = await _chat_create_with_fallback(
+            client,
+            model_chain,
             messages=planning_messages,
             stream=False,
             timeout=60,
         )
+        llm_retries_total += retries
         content = getattr(getattr(plan_resp.choices[0], "message", None), "content", "") if getattr(plan_resp, "choices", None) else ""
         plan_json = _extract_json_object(content)
         if isinstance(plan_json, dict):
@@ -1888,7 +2381,8 @@ async def _iterate_stream(
                         })
                 if parsed:
                     stages = parsed
-    except Exception:
+    except Exception as e:
+        _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "iterate", str(e))
         pass
 
     plan_md = ["## Plan de ejecucion (Iterador)\n", f"**Objetivo:** {objective}\n"]
@@ -1916,7 +2410,7 @@ async def _iterate_stream(
                 f"Meta de etapa: {stage_goal}\\n"
                 f"Intento {attempt}/{max_retries}. Ejecuta las acciones necesarias usando herramientas y reporta resultado."
             )
-            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, folder_id, conversation_id, dry_run)
+            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)
             last_output = result.get("text") or result.get("error") or ""
             if result.get("error"):
                 logs.append(f"Intento {attempt}: error -> {result['error']}\n")
@@ -1933,12 +2427,14 @@ async def _iterate_stream(
             passed = False
             reason = ""
             try:
-                val_resp = await client.chat.completions.create(
-                    model=model,
+                val_resp, model_used, retries, _errors = await _chat_create_with_fallback(
+                    client,
+                    model_chain,
                     messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": validate_prompt}],
                     stream=False,
                     timeout=40,
                 )
+                llm_retries_total += retries
                 val_content = getattr(getattr(val_resp.choices[0], "message", None), "content", "") if getattr(val_resp, "choices", None) else ""
                 val_json = _extract_json_object(val_content)
                 passed = bool(val_json.get("passed"))
@@ -1994,6 +2490,7 @@ async def _iterate_stream(
                     "stages": stages,
                     "done": done,
                 })
+                _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "iterate", f"stage_failed:{stage_name}")
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
             done[stage_name] = {"output": last_output, "checkpoint": checkpoint}
@@ -2012,6 +2509,7 @@ async def _iterate_stream(
         "stages": stages,
         "done": done,
     })
+    _record_router_metric(task_area, model_used, True, int((time.time() - started_at) * 1000), llm_retries_total, "iterate", route_reason)
     yield f"data: {json.dumps({'type': 'chunk', 'text': '## Iteracion finalizada\\nSe completaron y validaron todas las etapas del plan.'})}\n\n"
     yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -2020,6 +2518,7 @@ async def _agent_stream(
     history: list[dict],
     system_prompt: str = "",
     folder_id: str = "",
+    sandbox_root: str = "",
     mode: str = "normal",
     conversation_id: str = "",
     dry_run: bool = False,
@@ -2029,6 +2528,7 @@ async def _agent_stream(
         "run_id": run_id,
         "conversation_id": conversation_id,
         "folder_id": _safe_folder_id(folder_id),
+        "sandbox_root": sandbox_root,
         "mode": (mode or "normal").strip().lower(),
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "input": {"message": message, "history_size": len(history)},
@@ -2064,10 +2564,10 @@ async def _agent_stream(
             yield ev
         return
     if m == "iterate":
-        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, folder_id, conversation_id, dry_run)):
+        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):
             yield ev
         return
-    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, conversation_id, dry_run)):
+    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):
         yield ev
 
 
@@ -2139,6 +2639,7 @@ async def chat(req: ChatRequest):
             req.history,
             req.system_prompt,
             req.folder_id,
+            req.sandbox_root,
             req.mode,
             req.conversation_id,
             req.dry_run,
@@ -2150,6 +2651,22 @@ async def chat(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/actions/run_windows_command")
+async def action_run_windows_command(req: CommandActionRequest):
+    payload = _run_windows_command({
+        "command": req.command,
+        "cwd": req.cwd,
+        "sandbox_root": req.sandbox_root,
+        "timeout_sec": req.timeout_sec,
+        "idempotency_key": req.idempotency_key,
+        "approved": True,
+    })
+    try:
+        return json.loads(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"invalid command action result: {e}")
 
 
 @app.get("/health")
@@ -2231,6 +2748,31 @@ async def get_snapshot(conversation_id: str):
 async def save_snapshot(conversation_id: str, payload: dict):
     _save_snapshot(conversation_id, payload or {})
     return {"success": True}
+
+
+@app.get("/router/config")
+async def get_router_config():
+    return _load_task_router()
+
+
+@app.post("/router/config")
+async def save_router_config(payload: dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("areas"), dict):
+        raise HTTPException(status_code=400, detail="invalid router config")
+    _save_task_router(payload)
+    return {"success": True}
+
+
+@app.get("/router/metrics")
+async def get_router_metrics():
+    return _router_metrics_summary()
+
+
+@app.post("/router/recalibrate")
+async def recalibrate_router(payload: dict | None = None):
+    payload = payload or {}
+    min_samples = max(4, int(payload.get("min_samples", 12)))
+    return _recalibrate_router(min_samples=min_samples)
 
 
 @app.get("/settings")
@@ -2582,7 +3124,7 @@ async def list_files():
             "modified": f.stat().st_mtime,
         }
         for f in sorted(data_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)
-        if f.is_file()
+        if _is_visible_knowledge_file(f)
     ]
 
 

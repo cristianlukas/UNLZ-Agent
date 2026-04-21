@@ -67,6 +67,17 @@ Technical docs:
     - auto-configures `LLAMACPP_EXECUTABLE` and baseline settings
     - defaults to `<install_dir>/llama.cpp` and models under `<install_dir>/llama.cpp/models`
   - `↻` button to rescan while the app is open
+- Task router:
+  - classifies incoming request by domain area (`ocr`, `rag`, `docgen_informe`, etc.)
+  - selects winner model per area
+  - applies automatic fallback model chain when primary fails
+  - logs area/model quality metrics for recalibration
+  - Settings UI:
+    - area search/filter by name, model, profile, or keywords
+    - add/remove areas directly from UI
+    - global read-only metrics comparison table
+    - clickable column sorting and pagination
+    - local persistence of table preferences (`sort` and `pageSize`) when reopening Settings
 - System view:
   - CPU, RAM, VRAM
   - disks per drive letter (C:, D:, ...)
@@ -127,11 +138,13 @@ Config is stored in `.env` (editable from UI or file):
 - `LLM_PROVIDER=llamacpp|ollama|openai`
 - `AGENT_LANGUAGE=es|en|zh`
 - `AGENT_EXECUTION_MODE=confirm|autonomous`
-- `WEB_SEARCH_ENGINE=google|duckduckgo|auto`
 - `WEB_SEARCH_ENGINE=google|duckduckgo|serpapi|bing|fusion|auto`
 - `AGENT_MAX_ITERATIONS`, `AGENT_MAX_TOOL_CALLS`, `AGENT_MAX_WALL_TIME_SEC`, `AGENT_TOOL_TIMEOUT_SEC`
 - `AGENT_POLICY_FILESYSTEM|NETWORK|PROCESS|SYSTEM=allow|confirm|deny`
 - `AGENT_TELEMETRY_OPT_IN=true|false`
+- `TASK_ROUTER_AUTO_RECALIBRATE=true|false`
+- `TASK_ROUTER_RECALIBRATE_INTERVAL=100`
+- `TASK_ROUTER_MIN_SAMPLES=12`
 - `MINIMIZE_TO_TRAY_ON_CLOSE=true|false`
 - `WINDOW_CONTROLS_STYLE=windows|mac`
 - `WINDOW_CONTROLS_SIDE=left|right`

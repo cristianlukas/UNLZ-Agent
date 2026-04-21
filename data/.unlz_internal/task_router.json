@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "areas": {
+    "notificaciones": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "notificacion",
+        "cedula",
+        "juzgado",
+        "expediente",
+        "traslado",
+        "proveido"
+      ]
+    },
+    "resumen_asignacion": {
+      "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+      "fallback_models": [
+        "gemma-3-4b-it-q4_0"
+      ],
+      "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+      "keywords": [
+        "resumen",
+        "asignacion",
+        "pendiente",
+        "situacion",
+        "estado actual"
+      ]
+    },
+    "metadata": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "metadata",
+        "campos",
+        "normalizar",
+        "partes",
+        "dominio",
+        "monto",
+        "hechos"
+      ]
+    },
+    "jurisdiccion": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "jurisdiccion",
+        "fuero",
+        "camara",
+        "competencia",
+        "procesal"
+      ]
+    },
+    "ocr": {
+      "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+      "fallback_models": [
+        "gemma-3-4b-it-q4_0"
+      ],
+      "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+      "keywords": [
+        "ocr",
+        "scan",
+        "escaneado",
+        "texto sucio",
+        "ilegible",
+        "pdf imagen"
+      ]
+    },
+    "rag": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "rag",
+        "fuentes",
+        "base documental",
+        "conocimiento local",
+        "documentos"
+      ]
+    },
+    "chat_general": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "hola",
+        "ayuda",
+        "consulta",
+        "explicame",
+        "que podes hacer"
+      ]
+    },
+    "docgen_informe": {
+      "primary_model": "gemma-3-4b-it-q4_0",
+      "fallback_models": [
+        "qwen3.6-35b-a3b-unsloth-q4_k_m"
+      ],
+      "profile": "gemma3_4b_q40_jsonfmt",
+      "keywords": [
+        "informe",
+        "docgen",
+        "redacta",
+        "borrador",
+        "dictamen",
+        "seccion"
+      ]
+    },
+    "vlm": {
+      "primary_model": "qwen2.5-vl:7b",
+      "fallback_models": [
+        "gemma-3-4b-it-q4_0"
+      ],
+      "profile": "vlm_quality",
+      "keywords": [
+        "imagen",
+        "foto",
+        "visual",
+        "pagina escaneada",
+        "clasificar pagina",
+        "captura"
+      ]
+    }
+  }
+}

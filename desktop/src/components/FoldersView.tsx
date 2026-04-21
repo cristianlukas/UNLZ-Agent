@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderClosed, Plus, Trash2, Upload, MessageSquare } from "lucide-react";
-import { listFolderFiles, uploadFolderFile } from "../lib/api";
+import { FolderClosed, Plus, Trash2, Upload, MessageSquare, FolderOpen } from "lucide-react";
+import { listFolderFiles, pickDirectory, uploadFolderFile } from "../lib/api";
 import { useStore } from "../lib/store";
 
 function formatBytes(b: number) {
@@ -137,6 +137,38 @@ export default function FoldersView() {
             <section className="bg-surface border border-border rounded-xl p-4 space-y-3">
               <h3 className="text-xs uppercase tracking-wider text-muted font-semibold">Prompt de carpeta</h3>
               <div className="space-y-2">
+                <label className="text-xs text-secondary">Carpeta sandbox (opcional)</label>
+                <div className="flex gap-2">
+                  <input
+                    value={selected.sandboxPath ?? ""}
+                    onChange={(e) => updateFolder(selected.id, { sandboxPath: e.target.value })}
+                    placeholder="C:\Users\...\proyecto"
+                    className="flex-1 bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary outline-none focus:border-accent/50"
+                  />
+                  <button
+                    className="btn-ghost px-2.5 py-2"
+                    title="Elegir carpeta sandbox"
+                    onClick={async () => {
+                      const dir = await pickDirectory();
+                      if (dir) updateFolder(selected.id, { sandboxPath: dir });
+                    }}
+                  >
+                    <FolderOpen size={14} />
+                  </button>
+                  <button
+                    className="btn-ghost px-2.5 py-2 text-xs"
+                    title="Limpiar carpeta sandbox"
+                    onClick={() => updateFolder(selected.id, { sandboxPath: undefined })}
+                  >
+                    Limpiar
+                  </button>
+                </div>
+                <p className="text-[11px] text-muted">
+                  Si está definida, el agente ejecuta comandos y operaciones de archivos dentro de este sandbox.
+                  Si no está definida, pedirá confirmación explícita antes de ejecutar acciones mutantes.
+                </p>
+              </div>
+              <div className="space-y-2">
                 <label className="text-xs text-secondary">Comportamiento base (opcional)</label>
                 <select
                   value={selected.behaviorId ?? ""}
@@ -204,4 +236,3 @@ export default function FoldersView() {
     </div>
   );
 }
-
