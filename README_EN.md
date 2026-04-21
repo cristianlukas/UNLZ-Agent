@@ -61,6 +61,7 @@ Technical docs:
     - installs llama.cpp automatically when missing
     - updates when a newer version is detected
     - auto-configures `LLAMACPP_EXECUTABLE` and baseline settings
+    - defaults to `<install_dir>/llama.cpp` and models under `<install_dir>/llama.cpp/models`
   - `↻` button to rescan while the app is open
 - System view:
   - CPU, RAM, VRAM

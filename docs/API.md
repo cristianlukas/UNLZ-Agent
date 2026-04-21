@@ -93,7 +93,11 @@ Returns install/update state for llama.cpp:
 - detected executable path and support status
 
 ### `POST /llamacpp/installer/run`
-Downloads latest compatible Windows llama.cpp release, extracts it under `tools/llama.cpp`, and auto-configures `.env` (`LLAMACPP_EXECUTABLE`, provider and base defaults).
+Downloads latest compatible Windows llama.cpp release, extracts it under:
+- packaged app: `<install_dir>/llama.cpp`
+- dev mode: `<repo>/tools/llama.cpp`
+
+Then it auto-configures `.env` (`LLAMACPP_EXECUTABLE`, `LLAMACPP_MODELS_DIR`, provider and baseline defaults).
 
 ### `GET /models/gguf`
 Scans known roots for `.gguf` models and returns metadata.

@@ -2,36 +2,53 @@
 
 [🇬🇧 English](Next-Steps.md) | [🇪🇸 Español](Next-Steps_ES.md)
 
-Roadmap actualizado al estado actual del proyecto (desktop + agent_server).
+Esta hoja de ruta se enfoca en fortalecer **UNLZ Agent** como plataforma de agente (planificación, ejecución, validación, memoria y ecosistema MCP), más allá del modelo usado.
 
-## Fase 1: Estabilidad Operativa
+## Fase 1: Núcleo del Agente (Planificación + Ejecución)
 
-- [ ] Agregar tests automatizados para `/chat` (casos `step/chunk/error/done`).
-- [ ] Agregar test para fallback de `web_search` (sin resultados y error de proveedor).
-- [ ] Registrar metricas basicas (latencia, errores por endpoint, tool failures).
-- [ ] Implementar rotacion de `agent_server.log`.
+- [ ] Implementar loop explícito planner/executor/critic en backend (`plan -> ejecutar -> validar -> reintentar`), no sólo por prompt.
+- [ ] Soportar grafo de tareas (pasos dependientes, pasos paralelizables, checkpoints).
+- [ ] Agregar controles de iteración: máximo de iteraciones, máximo de tool calls, límite de tiempo global y por paso.
+- [ ] Persistir trazas de ejecución por corrida (versiones del plan, tools usadas, salidas, veredicto final).
 
-## Fase 2: Agente y Herramientas
+## Fase 2: Confiabilidad y Seguridad de Herramientas
 
-- [ ] Mejorar policy de comandos Windows (listas permitidas por contexto + audit trail).
-- [ ] Agregar confirmaciones finas por tipo de operacion (filesystem, red, procesos).
-- [ ] Incorporar fuentes/citas para respuestas de investigacion cuando usa `web_search`.
-- [ ] Añadir soporte de busqueda web adicional configurable (ej. SerpAPI/Bing).
+- [ ] Estandarizar contratos de tools: esquemas tipados de entrada/salida, códigos de error y hints de retry.
+- [ ] Agregar claves de idempotencia para tools mutantes (`run_windows_command`, escritura de archivos).
+- [ ] Implementar motor de políticas por contexto (allow/confirm/deny) según tipo de operación (filesystem/red/procesos/sistema).
+- [ ] Agregar modo dry-run para tareas accionables antes de ejecutar cambios reales.
 
-## Fase 3: UX de Chat
+## Fase 3: Verificación y Autocorrección
 
-- [ ] Mostrar motivo de fallo de herramienta en UI con detalle expandible.
-- [ ] Historial de ediciones de mensajes (versionado liviano).
-- [ ] Mejoras de accesibilidad (focus states, atajos, lectura de pantalla).
+- [ ] Agregar primitivas post-acción de verificación (archivo existe, contenido cambió, validación de salida de comando).
+- [ ] Definir estrategias automáticas de fallback cuando falla una tool (comando/proveedor alternativo).
+- [ ] Puntuar confianza por respuesta y por acción ejecutada.
+- [ ] Detectar afirmaciones no verificadas en modo investigación y forzar citas cuando la confianza sea baja.
 
-## Fase 4: Distribucion
+## Fase 4: MCP e Integraciones
 
-- [ ] Pipeline CI para build portable (`build-portable.ps1`) con artefactos versionados.
-- [ ] Firma de binarios para distribucion Windows.
-- [ ] Guia de release reproducible (checklist + versionado semantico).
+- [ ] Separar capacidades MCP por servidores de dominio (filesystem, shell, browser, docs, repo) con scopes explícitos.
+- [ ] Agregar perfiles de permisos por servidor y auditoría visible de scopes.
+- [ ] Incorporar tablero de salud de conectores (latencia, tasa de error, cuota).
+- [ ] Agregar proveedores web-search pluggables con fusión de ranking (Google/DDG/SerpAPI/Bing).
 
-## Fase 5: Documentacion
+## Fase 5: Memoria e Ingeniería de Contexto
 
-- [ ] Mantener docs de API sincronizados por version.
-- [ ] Agregar seccion de "breaking changes" entre modo legado y desktop.
-- [ ] Publicar un diagrama de secuencia del flujo chat + tools + SSE.
+- [ ] Implementar memoria de largo horizonte con estrategia de decaimiento y recuperación (reciente, semántica, ligada a tarea).
+- [ ] Separar memoria por carpeta y por conversación.
+- [ ] Agregar compresión automática de contexto (resúmenes + facts críticos fijados).
+- [ ] Agregar snapshots de estado para retomar tareas multi-sesión.
+
+## Fase 6: UX Competitiva (estilo Codex/Claude)
+
+- [ ] UI de “Plan Review” con alternativas, tradeoffs, camino elegido y puerta explícita de aprobación.
+- [ ] “Execution Console” con timeline de pasos y estado en vivo.
+- [ ] Controles de “reintentar desde este paso” y “ramificar desde aquí”.
+- [ ] Suite de benchmarks: tasa de éxito, tiempo a completar, cantidad de correcciones, eficiencia token/tool.
+
+## Fase 7: Producción y Escalabilidad
+
+- [ ] Quality gates en CI: tests backend/frontend y smoke tests empaquetados.
+- [ ] Firma de artefactos y metadata de build reproducible.
+- [ ] Telemetría estructurada (opt-in) para métricas de calidad del agente.
+- [ ] Publicar ADRs (Architecture Decision Records) para decisiones clave de agente/MCP.

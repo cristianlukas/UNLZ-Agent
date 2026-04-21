@@ -1,7 +1,20 @@
 import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+def _runtime_root_dir() -> Path:
+    override = (os.getenv("UNLZ_PROJECT_ROOT") or "").strip()
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir.name.lower() == "binaries":
+            return exe_dir.parent
+        return exe_dir
+    return Path(__file__).parent
+
+load_dotenv(dotenv_path=_runtime_root_dir() / ".env")
 
 class Config:
     # Provider Settings

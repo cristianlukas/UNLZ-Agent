@@ -61,6 +61,7 @@ Documentación técnica:
     - instala llama.cpp automáticamente si no existe
     - actualiza cuando detecta nueva versión
     - autoconfigura `LLAMACPP_EXECUTABLE` y valores base
+    - usa por defecto `<directorio de instalación>/llama.cpp` y modelos en `<directorio de instalación>/llama.cpp/models`
   - botón `↻` para reanalizar en caliente sin cerrar la app
 - Vista Sistema:
   - CPU, RAM, VRAM

@@ -1,4 +1,8 @@
 !macro NSIS_HOOK_POSTINSTALL
+  ; Ensure default managed llama.cpp directories exist in install root.
+  CreateDirectory "$INSTDIR\llama.cpp"
+  CreateDirectory "$INSTDIR\llama.cpp\models"
+
   ; Do not create desktop shortcut here.
   ; Desktop shortcut must be controlled only by the Finish-page checkbox.
   ; We only clean stale desktop links and normalize Start Menu icon.

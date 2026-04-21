@@ -28,6 +28,9 @@ El script:
 
 ## 3. Configurar `.env`
 
+En app instalada (setup NSIS), `.env` se guarda en la carpeta de instalación:
+`<directorio de instalación>\\.env` (por defecto `C:\\Users\\<usuario>\\AppData\\Local\\UNLZ Agent\\.env`).
+
 Ejemplo mínimo para llama.cpp:
 
 ```env
@@ -76,6 +79,7 @@ También muestra selector de idioma (Español/English) y usa `icon.ico` como íc
   - botón de carpeta para elegir `LLAMACPP_MODELS_DIR` desde explorador
   - botón de archivo para elegir `llama-server.exe` desde explorador
   - botón `Instalar/Actualizar llama.cpp` que instala o actualiza automáticamente y autoconfigura rutas base
+  - ubicación por defecto: `<directorio de instalación>/llama.cpp` (modelos: `<directorio de instalación>/llama.cpp/models`)
   - botón `↻` para reanalizar si aparece un modelo nuevo con la app abierta
 - **Modo Plan**: botón en chat (afecta primer envío)
 - **Modo Iterador**: ejecución por etapas con validación

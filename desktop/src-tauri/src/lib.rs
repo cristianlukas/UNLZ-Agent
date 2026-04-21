@@ -36,6 +36,23 @@ fn project_root() -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
 }
 
+fn runtime_root_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("UNLZ_PROJECT_ROOT") {
+        return PathBuf::from(p);
+    }
+    if cfg!(debug_assertions) {
+        return project_root();
+    }
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
+    if exe_dir.file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some("binaries".to_string()) {
+        return exe_dir.parent().map(|p| p.to_path_buf()).unwrap_or(exe_dir);
+    }
+    exe_dir
+}
+
 fn resolve_python(root: &PathBuf) -> String {
     if let Ok(p) = std::env::var("UNLZ_PYTHON") {
         return p;
@@ -119,8 +136,15 @@ fn do_spawn(_root: &PathBuf, _python: &str) -> Option<Child> {
         return None;
     };
 
+    let runtime_root = if exe_dir.file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some("binaries".to_string()) {
+        exe_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| exe_dir.clone())
+    } else {
+        exe_dir.clone()
+    };
+
     let mut cmd = Command::new(&sidecar);
-    cmd.current_dir(&exe_dir);
+    cmd.current_dir(&runtime_root);
+    cmd.env("UNLZ_PROJECT_ROOT", &runtime_root);
 
     #[cfg(windows)]
     {
@@ -146,7 +170,7 @@ fn refresh_windows_shortcut_and_icon_cache() {
     }
     let exe_str = exe.to_string_lossy().replace('\'', "''");
     let exe_dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    let icon_candidate = exe_dir.join("resources").join("icon.ico");
+    let icon_candidate = exe_dir.join("icons").join("icon.ico");
     let icon_path = if icon_candidate.exists() { icon_candidate } else { exe.clone() };
     let icon_str = icon_path.to_string_lossy().replace('\'', "''");
     let ps = format!(
@@ -170,22 +194,23 @@ Start-Process ie4uinit.exe -ArgumentList '-show' -WindowStyle Hidden;"#,
         exe_str,
         icon_str
     );
-    let _ = Command::new("powershell")
-        .arg("-NoProfile")
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
         .arg("-ExecutionPolicy")
         .arg("Bypass")
         .arg("-Command")
-        .arg(ps)
-        .spawn();
+        .arg(ps);
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd.spawn();
 }
 
 // ─── .env helpers ────────────────────────────────────────────────────────────
 
 fn env_file_path() -> PathBuf {
-    if let Ok(root) = std::env::var("UNLZ_PROJECT_ROOT") {
-        return PathBuf::from(root).join(".env");
-    }
-    project_root().join(".env")
+    runtime_root_dir().join(".env")
 }
 
 fn read_bool_setting(key: &str, default_value: bool) -> bool {

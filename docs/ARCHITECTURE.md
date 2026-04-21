@@ -14,6 +14,10 @@
 
 - `7719`: Agent Server (`agent_server.py`)
 - `8080`: llama.cpp server (default)
+
+llama.cpp managed install location:
+- packaged app: `<install_dir>/llama.cpp`
+- dev mode: `<repo>/tools/llama.cpp`
 - `1420`: Vite dev server (desktop frontend during dev)
 - `8000`: MCP server (legacy mode)
 

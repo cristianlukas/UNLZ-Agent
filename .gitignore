@@ -37,6 +37,38 @@ mcp.json
 
 # Logs
 *.log
+logs/
+
+# Desktop/Tauri artifacts
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/.tauri/
+
+# Local installed/managed tool artifacts (dev)
+tools/
+tmp/
+temp/
+
+# Build outputs
+dist-single-exe/
+dist-portable/
+*.spec
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local runtime / cache
+agent_server.log
+*.pid
+
+# Keep only source assets under desktop/src/assets
+desktop/src/assets/*.tmp
+desktop/src/assets/*.bak
 dist-single-exe/UNLZ-Agent-Setup.exe
 desktop/src-tauri/binaries/agent_server.exe
 .claude/worktrees/gracious-einstein-90c379/

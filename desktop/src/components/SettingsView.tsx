@@ -203,6 +203,14 @@ export default function SettingsView() {
     setInstallerBusy(true);
     try {
       const result = await runLlamacppInstaller();
+      setConfig((prev) => ({
+        ...prev,
+        LLM_PROVIDER: "llamacpp",
+        LLAMACPP_EXECUTABLE: result.executable || prev.LLAMACPP_EXECUTABLE || "",
+        LLAMACPP_MODELS_DIR: result.models_dir || prev.LLAMACPP_MODELS_DIR || "",
+        LLAMACPP_MODEL_PATH: result.model_path || prev.LLAMACPP_MODEL_PATH || "",
+        LLAMACPP_MODEL_ALIAS: result.model_alias || prev.LLAMACPP_MODEL_ALIAS || "local-model",
+      }));
       const next = await getSettings();
       setConfig((prev) => ({ ...prev, ...next }));
       await refreshInstallerStatus();
@@ -215,6 +223,7 @@ export default function SettingsView() {
   }
 
   const provider = config.LLM_PROVIDER || "ollama";
+  const resolvedLlamacppExecutable = (config.LLAMACPP_EXECUTABLE || installerStatus?.executable || "").trim();
   const controlsOrder = config.WINDOW_CONTROLS_ORDER || "minimize,maximize,close";
   const modelOptions = (() => {
     const opts = ggufModels.map((m) => ({
@@ -407,7 +416,7 @@ export default function SettingsView() {
             <Field label="llama-server.exe" hint="Path to the llama-server executable">
               <div className="flex gap-2">
                 <Input
-                  value={config.LLAMACPP_EXECUTABLE}
+                  value={resolvedLlamacppExecutable}
                   onChange={() => {}}
                   placeholder="C:\path\to\llama-server.exe"
                   mono

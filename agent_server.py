@@ -44,7 +44,22 @@ from pydantic import BaseModel
 
 # Project root on sys.path
 sys.path.insert(0, str(Path(__file__).parent))
-load_dotenv()
+
+
+def _runtime_root_dir() -> Path:
+    override = (os.getenv("UNLZ_PROJECT_ROOT") or "").strip()
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        # Installed layout: <install_dir>\binaries\agent_server.exe
+        if exe_dir.name.lower() == "binaries":
+            return exe_dir.parent
+        return exe_dir
+    return Path(__file__).parent
+
+
+load_dotenv(dotenv_path=_runtime_root_dir() / ".env")
 
 from config import Config
 
@@ -77,7 +92,7 @@ def _http_reachable(url: str, timeout: float = 1.5) -> bool:
 
 def _reload_config_runtime() -> None:
     """Refresh Config class attributes from current process env/.env."""
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path=_env_path(), override=True)
     Config.VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").lower()
     Config.LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
     Config.AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "en").lower()
@@ -116,7 +131,7 @@ def _slug_alias(name: str) -> str:
 
 
 def _env_path() -> Path:
-    return Path(__file__).parent / ".env"
+    return _runtime_root_dir() / ".env"
 
 
 def _upsert_env_settings(payload: dict) -> None:
@@ -133,11 +148,23 @@ def _upsert_env_settings(payload: dict) -> None:
 
 
 def _llamacpp_install_root() -> Path:
+    override = (os.getenv("LLAMACPP_INSTALL_DIR") or "").strip()
+    if override:
+        return Path(override)
+    if getattr(sys, "frozen", False):
+        return _runtime_root_dir() / "llama.cpp"
+    # Dev layout: keep local tooling under the project root.
     return Path(Config.BASE_DIR) / "tools" / "llama.cpp"
 
 
 def _llamacpp_install_meta_path() -> Path:
     return _llamacpp_install_root() / "install.json"
+
+
+def _ensure_llamacpp_default_dirs() -> None:
+    root = _llamacpp_install_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "models").mkdir(parents=True, exist_ok=True)
 
 
 def _read_llamacpp_install_meta() -> dict:
@@ -1469,6 +1496,7 @@ async def llamacpp_status():
 @app.get("/llamacpp/installer/status")
 async def llamacpp_installer_status():
     _reload_config_runtime()
+    _ensure_llamacpp_default_dirs()
     if os.name != "nt":
         return {
             "supported": False,
@@ -1521,6 +1549,7 @@ async def llamacpp_installer_status():
 @app.post("/llamacpp/installer/run")
 async def llamacpp_installer_run():
     _reload_config_runtime()
+    _ensure_llamacpp_default_dirs()
     if os.name != "nt":
         raise HTTPException(400, "Installer is supported only on Windows.")
 
@@ -1568,15 +1597,9 @@ async def llamacpp_installer_run():
 
     models_dir = (Config.LLAMACPP_MODELS_DIR or "").strip()
     if not models_dir:
-        preferred = Path.home() / "Models" / "llamacpp"
-        fallback = Path.home() / "Models"
-        if preferred.exists():
-            models_dir = str(preferred)
-        elif fallback.exists():
-            models_dir = str(fallback)
-        else:
-            models_dir = str(preferred)
-            preferred.mkdir(parents=True, exist_ok=True)
+        default_models_dir = _llamacpp_install_root() / "models"
+        default_models_dir.mkdir(parents=True, exist_ok=True)
+        models_dir = str(default_models_dir)
 
     model_path = (Config.LLAMACPP_MODEL_PATH or "").strip()
     model_alias = (Config.LLAMACPP_MODEL_ALIAS or "").strip()
@@ -1834,9 +1857,14 @@ async def stats():
 
 if __name__ == "__main__":
     port = int(os.getenv("AGENT_SERVER_PORT", "7719"))
+    try:
+        _ensure_llamacpp_default_dirs()
+    except Exception as e:
+        print(f"[unlz] llama.cpp dir init warning: {e}")
     print(f"UNLZ Agent Server v2 — port {port}")
     print(f"Provider : {Config.LLM_PROVIDER}")
     print(f"Language : {Config.AGENT_LANGUAGE}")
+    print(f"llama.cpp dir : {_llamacpp_install_root()}")
     if Config.LLM_PROVIDER == "llamacpp":
         print(f"Model    : {Config.LLAMACPP_MODEL_ALIAS} @ {Config.LLAMACPP_MODEL_PATH}")
     uvicorn.run(

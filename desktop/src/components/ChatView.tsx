@@ -7,6 +7,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { streamChat } from "../lib/api";
 import type { AgentStep, ChatMessage } from "../lib/types";
 import { useStore, useActiveConv, useActiveBehavior, useActiveFolder } from "../lib/store";
+import unlzLogo from "../assets/unlz-logo.png";
 
 let _msgId = Date.now();
 const uid = () => String(++_msgId);
@@ -82,7 +83,7 @@ function Message({
     <div className="flex gap-3 mb-4 animate-fadeIn">
       {/* Avatar */}
       <div className="shrink-0 w-7 h-7 rounded-lg bg-accent-dim flex items-center justify-center mt-0.5">
-        <span className="text-accent text-xs font-bold">U</span>
+        <img src={unlzLogo} alt="UNLZ" className="w-4 h-4 object-contain" />
       </div>
 
       <div className="flex-1 min-w-0 group">
@@ -240,7 +241,7 @@ function Welcome() {
     <div className="flex flex-col items-center justify-center h-full gap-6 px-8 animate-fadeIn">
       <div className="text-center space-y-2">
         <div className="w-14 h-14 rounded-2xl bg-accent-dim flex items-center justify-center mx-auto mb-4 glow-accent-sm">
-          <span className="text-2xl font-bold gradient-text">U</span>
+          <img src={unlzLogo} alt="UNLZ" className="w-8 h-8 object-contain" />
         </div>
         <h1 className="text-xl font-semibold text-primary">UNLZ Agent</h1>
         <p className="text-sm text-muted">

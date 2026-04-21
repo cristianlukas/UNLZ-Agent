@@ -28,6 +28,9 @@ This script:
 
 ## 3. Configure `.env`
 
+In the installed app (NSIS setup), `.env` is stored in the install directory:
+`<install_dir>\\.env` (default `C:\\Users\\<user>\\AppData\\Local\\UNLZ Agent\\.env`).
+
 Minimal llama.cpp example:
 
 ```env
@@ -76,6 +79,7 @@ It also shows a language selector (Spanish/English) and uses `icon.ico` as setup
   - folder button to pick `LLAMACPP_MODELS_DIR` from explorer
   - file button to pick `llama-server.exe` from explorer
   - `Install/Update llama.cpp` button to install or update automatically and auto-configure baseline paths
+  - default install location: `<install_dir>/llama.cpp` (models: `<install_dir>/llama.cpp/models`)
   - `↻` rescan button for new models while app is running
 - **Plan mode**: chat button, affects first send only
 - **Iterator mode**: staged autonomous execution + validation
