@@ -55,10 +55,24 @@ Notes:
 - `agent_server.py` listens on `http://127.0.0.1:7719`
 - startup script cleans stale listeners on `1420` and `7719`
 
+## 4.1 Single installer build (.exe)
+
+```powershell
+.\build_exe.bat
+```
+
+Expected output:
+- `dist-single-exe\UNLZ-Agent-Setup.exe`
+
+This installer uses offline WebView2 mode and deploys app + backend sidecar internally.
+
 ## 5. Key features to test
 
 - **llama.cpp model selector**:
   - auto-detected `.gguf` dropdown
+  - folder button to pick `LLAMACPP_MODELS_DIR` from explorer
+  - file button to pick `llama-server.exe` from explorer
+  - `Install/Update llama.cpp` button to install or update automatically and auto-configure baseline paths
   - `↻` rescan button for new models while app is running
 - **Plan mode**: chat button, affects first send only
 - **Iterator mode**: staged autonomous execution + validation

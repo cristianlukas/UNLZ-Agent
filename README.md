@@ -54,6 +54,12 @@ Documentación técnica:
   - orden de botones (`minimize/maximize/close`)
 - Selector de modelos llama.cpp:
   - dropdown de `.gguf` detectados en carpeta de modelos y subdirectorios
+  - botón de carpeta para elegir `LLAMACPP_MODELS_DIR` desde explorador
+  - botón de archivo para elegir `llama-server.exe` desde explorador
+  - botón `Instalar/Actualizar llama.cpp`:
+    - instala llama.cpp automáticamente si no existe
+    - actualiza cuando detecta nueva versión
+    - autoconfigura `LLAMACPP_EXECUTABLE` y valores base
   - botón `↻` para reanalizar en caliente sin cerrar la app
 - Vista Sistema:
   - CPU, RAM, VRAM
@@ -88,6 +94,22 @@ Desde la raíz del repo:
 ```
 
 Esto levanta la app desktop y el backend local.
+
+## Build .exe (Un Archivo)
+
+Desde la raíz del repo:
+
+```powershell
+.\build_exe.bat
+```
+
+Genera un instalador único en:
+- `dist-single-exe\UNLZ-Agent-Setup.exe`
+
+Características del instalador:
+- archivo único para distribuir
+- instala app + backend sidecar automáticamente
+- incluye instalación offline de WebView2 (no requiere descarga durante setup)
 
 ## Configuración
 

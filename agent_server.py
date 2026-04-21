@@ -11,7 +11,11 @@ import json
 import os
 import re
 import sys
+import tempfile
+import zipfile
+from datetime import datetime
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 # ── Redirect stdout/stderr to log when not running in a real terminal ─────────
 # Covers: Tauri subprocess (CREATE_NO_WINDOW), background launch, etc.
@@ -69,6 +73,144 @@ def _http_reachable(url: str, timeout: float = 1.5) -> bool:
             conn.close()
     except Exception:
         return False
+
+
+def _reload_config_runtime() -> None:
+    """Refresh Config class attributes from current process env/.env."""
+    load_dotenv(override=True)
+    Config.VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").lower()
+    Config.LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
+    Config.AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "en").lower()
+    Config.MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
+    Config.AGENT_EXECUTION_MODE = os.getenv("AGENT_EXECUTION_MODE", "confirm").lower()
+    Config.AGENT_COMMAND_TIMEOUT_SEC = int(os.getenv("AGENT_COMMAND_TIMEOUT_SEC", "60"))
+    Config.AGENT_COMMAND_MAX_OUTPUT = int(os.getenv("AGENT_COMMAND_MAX_OUTPUT", "4000"))
+    Config.WEB_SEARCH_ENGINE = os.getenv("WEB_SEARCH_ENGINE", "google").lower()
+    Config.SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    Config.SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+    Config.OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    Config.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:14b")
+    Config.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    Config.OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    Config.LLAMACPP_EXECUTABLE = os.getenv("LLAMACPP_EXECUTABLE", "")
+    Config.LLAMACPP_MODEL_PATH = os.getenv("LLAMACPP_MODEL_PATH", "")
+    Config.LLAMACPP_HOST = os.getenv("LLAMACPP_HOST", "127.0.0.1")
+    Config.LLAMACPP_PORT = int(os.getenv("LLAMACPP_PORT", "8080"))
+    Config.LLAMACPP_CONTEXT_SIZE = int(os.getenv("LLAMACPP_CONTEXT_SIZE", "32768"))
+    Config.LLAMACPP_N_GPU_LAYERS = int(os.getenv("LLAMACPP_N_GPU_LAYERS", "999"))
+    Config.LLAMACPP_FLASH_ATTN = os.getenv("LLAMACPP_FLASH_ATTN", "true").lower() == "true"
+    Config.LLAMACPP_MODEL_ALIAS = os.getenv("LLAMACPP_MODEL_ALIAS", "local-model")
+    Config.LLAMACPP_CACHE_TYPE_K = os.getenv("LLAMACPP_CACHE_TYPE_K", "")
+    Config.LLAMACPP_CACHE_TYPE_V = os.getenv("LLAMACPP_CACHE_TYPE_V", "")
+    Config.LLAMACPP_EXTRA_ARGS = os.getenv("LLAMACPP_EXTRA_ARGS", "")
+    Config.LLAMACPP_MODELS_DIR = os.getenv("LLAMACPP_MODELS_DIR", "")
+    Config.N8N_ENABLED = os.getenv("N8N_ENABLED", "true").lower() == "true"
+    Config.N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "http://127.0.0.1:5678/webhook/chat")
+
+
+def _slug_alias(name: str) -> str:
+    alias = (name or "local-model").strip().lower()
+    for ch in ("_", ".", " "):
+        alias = alias.replace(ch, "-")
+    return alias
+
+
+def _env_path() -> Path:
+    return Path(__file__).parent / ".env"
+
+
+def _upsert_env_settings(payload: dict) -> None:
+    env_path = _env_path()
+    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    for key, value in payload.items():
+        if key != key.upper():
+            continue
+        pattern = re.compile(f"^{re.escape(key)}=.*", re.MULTILINE)
+        line = f"{key}={value}"
+        content = pattern.sub(lambda _: line, content) if pattern.search(content) else (content + f"\n{line}")
+    env_path.write_text(content.strip() + "\n", encoding="utf-8")
+    _reload_config_runtime()
+
+
+def _llamacpp_install_root() -> Path:
+    return Path(Config.BASE_DIR) / "tools" / "llama.cpp"
+
+
+def _llamacpp_install_meta_path() -> Path:
+    return _llamacpp_install_root() / "install.json"
+
+
+def _read_llamacpp_install_meta() -> dict:
+    p = _llamacpp_install_meta_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_llamacpp_install_meta(data: dict) -> None:
+    root = _llamacpp_install_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _llamacpp_install_meta_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _find_llama_server_executable(root: Path) -> Optional[Path]:
+    try:
+        candidates = list(root.rglob("llama-server.exe"))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+    except Exception:
+        return None
+
+
+def _find_first_gguf(root: Path) -> Optional[Path]:
+    try:
+        g = list(root.rglob("*.gguf"))
+        if not g:
+            return None
+        g.sort(key=lambda p: p.stat().st_size, reverse=True)
+        return g[0]
+    except Exception:
+        return None
+
+
+def _github_latest_llamacpp_release() -> dict:
+    req = Request(
+        "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "unlz-agent"},
+    )
+    with urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _pick_windows_asset(assets: list[dict]) -> Optional[dict]:
+    best = None
+    best_score = -10**9
+    for a in assets or []:
+        name = (a.get("name") or "").lower()
+        if not name.endswith(".zip") or "win" not in name:
+            continue
+        score = 0
+        if "win" in name:
+            score += 100
+        if "cpu" in name:
+            score += 30
+        if "x64" in name:
+            score += 15
+        if "cuda" in name or "cu" in name:
+            score -= 15
+        if "vulkan" in name:
+            score -= 10
+        if "arm" in name:
+            score -= 30
+        if score > best_score:
+            best_score = score
+            best = a
+    return best
 
 
 def _collect_vram_stats() -> dict:
@@ -1158,6 +1300,7 @@ app.add_middleware(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    _reload_config_runtime()
     return StreamingResponse(
         _agent_stream(req.message, req.history, req.system_prompt, req.folder_id, req.mode),
         media_type="text/event-stream",
@@ -1171,6 +1314,7 @@ async def chat(req: ChatRequest):
 
 @app.get("/health")
 async def health():
+    _reload_config_runtime()
     provider = Config.LLM_PROVIDER
     components: dict = {}
 
@@ -1225,16 +1369,7 @@ async def get_settings():
 
 @app.post("/settings")
 async def save_settings(payload: dict):
-    import re
-    env_path = Path(__file__).parent / ".env"
-    content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    for key, value in payload.items():
-        if key == key.upper():
-            pattern = re.compile(f"^{re.escape(key)}=.*", re.MULTILINE)
-            line = f"{key}={value}"
-            content = pattern.sub(lambda _: line, content) if pattern.search(content) else content + f"\n{line}"
-    env_path.write_text(content.strip(), encoding="utf-8")
-    load_dotenv(env_path, override=True)
+    _upsert_env_settings(payload)
     return {"success": True}
 
 
@@ -1270,7 +1405,7 @@ def _build_llamacpp_args() -> list[str]:
 @app.post("/llamacpp/start")
 async def llamacpp_start():
     global _llamacpp_proc
-    load_dotenv(override=True)
+    _reload_config_runtime()
 
     if not Config.LLAMACPP_EXECUTABLE:
         raise HTTPException(400, "LLAMACPP_EXECUTABLE not configured")
@@ -1313,6 +1448,7 @@ async def llamacpp_stop():
 
 @app.get("/llamacpp/status")
 async def llamacpp_status():
+    _reload_config_runtime()
     base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
     running = _http_reachable(f"{base}/health", timeout=1.0)
     managed = bool(_llamacpp_proc and _llamacpp_proc.poll() is None)
@@ -1327,13 +1463,167 @@ async def llamacpp_status():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# llama.cpp installer/update
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/llamacpp/installer/status")
+async def llamacpp_installer_status():
+    _reload_config_runtime()
+    if os.name != "nt":
+        return {
+            "supported": False,
+            "reason": "Windows-only installer",
+            "installed": False,
+            "installed_version": "",
+            "latest_version": "",
+            "update_available": False,
+            "executable": Config.LLAMACPP_EXECUTABLE,
+        }
+
+    meta = _read_llamacpp_install_meta()
+    install_root = _llamacpp_install_root()
+    exe = _find_llama_server_executable(install_root)
+    configured_exe = Path(Config.LLAMACPP_EXECUTABLE) if Config.LLAMACPP_EXECUTABLE else None
+    if not exe and configured_exe and configured_exe.exists():
+        exe = configured_exe
+
+    installed_version = str(meta.get("version", "")).strip()
+    if not installed_version and exe:
+        m = re.search(r"(b\d{3,6})", str(exe), flags=re.IGNORECASE)
+        if m:
+            installed_version = m.group(1).lower()
+
+    latest_version = ""
+    update_available = False
+    release_error = ""
+    try:
+        latest = _github_latest_llamacpp_release()
+        latest_version = str(latest.get("tag_name") or "")
+        if latest_version:
+            if installed_version:
+                update_available = installed_version != latest_version
+            else:
+                update_available = False
+    except Exception as e:
+        release_error = str(e)
+
+    return {
+        "supported": True,
+        "installed": bool(exe and exe.exists()),
+        "installed_version": installed_version,
+        "latest_version": latest_version,
+        "update_available": update_available,
+        "executable": str(exe) if exe else Config.LLAMACPP_EXECUTABLE,
+        "release_error": release_error,
+    }
+
+
+@app.post("/llamacpp/installer/run")
+async def llamacpp_installer_run():
+    _reload_config_runtime()
+    if os.name != "nt":
+        raise HTTPException(400, "Installer is supported only on Windows.")
+
+    try:
+        latest = _github_latest_llamacpp_release()
+    except Exception as e:
+        raise HTTPException(502, f"Could not query llama.cpp releases: {e}")
+
+    tag = str(latest.get("tag_name") or "").strip()
+    assets = latest.get("assets") or []
+    asset = _pick_windows_asset(assets)
+    if not asset:
+        raise HTTPException(502, "No compatible Windows .zip asset found in latest llama.cpp release.")
+
+    asset_url = asset.get("browser_download_url")
+    asset_name = asset.get("name") or "llama.cpp-win.zip"
+    if not asset_url:
+        raise HTTPException(502, "Invalid release asset metadata.")
+
+    install_root = _llamacpp_install_root()
+    install_root.mkdir(parents=True, exist_ok=True)
+    version_dir = install_root / (tag or "latest")
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="unlz-llamacpp-") as tmp:
+        zip_path = Path(tmp) / asset_name
+        req = Request(asset_url, headers={"User-Agent": "unlz-agent"})
+        try:
+            with urlopen(req, timeout=180) as resp:
+                zip_path.write_bytes(resp.read())
+        except Exception as e:
+            raise HTTPException(502, f"Download failed: {e}")
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(version_dir)
+        except Exception as e:
+            raise HTTPException(500, f"Extraction failed: {e}")
+
+    exe = _find_llama_server_executable(version_dir)
+    if not exe:
+        exe = _find_llama_server_executable(install_root)
+    if not exe:
+        raise HTTPException(500, "Installed package does not contain llama-server.exe")
+
+    models_dir = (Config.LLAMACPP_MODELS_DIR or "").strip()
+    if not models_dir:
+        preferred = Path.home() / "Models" / "llamacpp"
+        fallback = Path.home() / "Models"
+        if preferred.exists():
+            models_dir = str(preferred)
+        elif fallback.exists():
+            models_dir = str(fallback)
+        else:
+            models_dir = str(preferred)
+            preferred.mkdir(parents=True, exist_ok=True)
+
+    model_path = (Config.LLAMACPP_MODEL_PATH or "").strip()
+    model_alias = (Config.LLAMACPP_MODEL_ALIAS or "").strip()
+    if not model_path or not Path(model_path).exists():
+        discovered = _find_first_gguf(Path(models_dir))
+        if discovered:
+            model_path = str(discovered)
+            model_alias = _slug_alias(discovered.stem)
+    if not model_alias:
+        model_alias = "local-model"
+
+    payload = {
+        "LLM_PROVIDER": "llamacpp",
+        "LLAMACPP_EXECUTABLE": str(exe),
+        "LLAMACPP_MODELS_DIR": models_dir,
+        "LLAMACPP_MODEL_ALIAS": model_alias,
+    }
+    if model_path:
+        payload["LLAMACPP_MODEL_PATH"] = model_path
+    _upsert_env_settings(payload)
+
+    _write_llamacpp_install_meta({
+        "version": tag,
+        "asset_name": asset_name,
+        "asset_url": asset_url,
+        "installed_at": datetime.now().isoformat(timespec="seconds"),
+        "executable": str(exe),
+    })
+
+    return {
+        "status": "ok",
+        "installed_version": tag,
+        "executable": str(exe),
+        "models_dir": models_dir,
+        "model_path": model_path,
+        "model_alias": model_alias,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GGUF model discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/models/gguf")
 async def list_gguf_models():
     """Scan filesystem for .gguf files and return metadata."""
-    load_dotenv(override=True)  # pick up latest .env in case user just saved settings
+    _reload_config_runtime()  # pick up latest .env in case user just saved settings
 
     search_roots: set[Path] = set()
 

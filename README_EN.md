@@ -54,6 +54,12 @@ Technical docs:
   - button order (`minimize/maximize/close`)
 - llama.cpp model selector:
   - dropdown of `.gguf` models detected in model directories and subdirectories
+  - folder button to pick `LLAMACPP_MODELS_DIR` from a native browser dialog
+  - file button to pick `llama-server.exe` from a native browser dialog
+  - `Install/Update llama.cpp` button:
+    - installs llama.cpp automatically when missing
+    - updates when a newer version is detected
+    - auto-configures `LLAMACPP_EXECUTABLE` and baseline settings
   - `↻` button to rescan while the app is open
 - System view:
   - CPU, RAM, VRAM
@@ -88,6 +94,22 @@ From repo root:
 ```
 
 This starts the desktop app and local backend.
+
+## Single-File .exe Build
+
+From repository root:
+
+```powershell
+.\build_exe.bat
+```
+
+This generates a single installer at:
+- `dist-single-exe\UNLZ-Agent-Setup.exe`
+
+Installer behavior:
+- one file to distribute
+- installs app + backend sidecar automatically
+- uses offline WebView2 installation mode (no internet required during setup)
 
 ## Configuration
 

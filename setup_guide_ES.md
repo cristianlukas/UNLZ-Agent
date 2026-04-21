@@ -55,10 +55,24 @@ Notas:
 - `agent_server.py` escucha en `http://127.0.0.1:7719`
 - el script limpia listeners stale en `1420` y `7719`
 
+## 4.1 Build instalador único (.exe)
+
+```powershell
+.\build_exe.bat
+```
+
+Salida esperada:
+- `dist-single-exe\UNLZ-Agent-Setup.exe`
+
+Este instalador incluye modo offline para WebView2 y despliega internamente app + backend.
+
 ## 5. Funciones clave para probar
 
 - **Selector de modelos llama.cpp**:
   - dropdown con modelos `.gguf` detectados automáticamente
+  - botón de carpeta para elegir `LLAMACPP_MODELS_DIR` desde explorador
+  - botón de archivo para elegir `llama-server.exe` desde explorador
+  - botón `Instalar/Actualizar llama.cpp` que instala o actualiza automáticamente y autoconfigura rutas base
   - botón `↻` para reanalizar si aparece un modelo nuevo con la app abierta
 - **Modo Plan**: botón en chat (afecta primer envío)
 - **Modo Iterador**: ejecución por etapas con validación

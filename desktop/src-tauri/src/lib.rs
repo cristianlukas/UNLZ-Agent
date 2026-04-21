@@ -94,16 +94,24 @@ fn do_spawn(_root: &PathBuf, _python: &str) -> Option<Child> {
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_default();
 
-    let sidecar = if cfg!(windows) {
-        exe_dir.join("agent_server.exe")
+    let candidates: Vec<PathBuf> = if cfg!(windows) {
+        vec![
+            exe_dir.join("agent_server.exe"),
+            exe_dir.join("resources").join("agent_server.exe"),
+            exe_dir.join("..").join("Resources").join("agent_server.exe"),
+        ]
     } else {
-        exe_dir.join("agent_server")
+        vec![
+            exe_dir.join("agent_server"),
+            exe_dir.join("resources").join("agent_server"),
+            exe_dir.join("..").join("Resources").join("agent_server"),
+        ]
     };
-
-    if !sidecar.exists() {
-        eprintln!("[unlz] sidecar not found at {:?}", sidecar);
+    let sidecar = candidates.into_iter().find(|p| p.exists());
+    let Some(sidecar) = sidecar else {
+        eprintln!("[unlz] sidecar not found in expected locations near {:?}", exe_dir);
         return None;
-    }
+    };
 
     let mut cmd = Command::new(&sidecar);
     cmd.current_dir(&exe_dir);
@@ -184,6 +192,25 @@ fn save_settings(payload: std::collections::HashMap<String, String>) -> Result<(
 }
 
 #[tauri::command]
+fn pick_directory() -> Option<String> {
+    rfd::FileDialog::new()
+        .pick_folder()
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn pick_file(filter_name: Option<String>, extensions: Option<Vec<String>>) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new();
+    if let (Some(name), Some(exts)) = (filter_name.as_deref(), extensions.as_deref()) {
+        if !exts.is_empty() {
+            let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(name, &ext_refs);
+        }
+    }
+    dialog.pick_file().map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn restart_agent(state: tauri::State<AgentState>) -> String {
     let root = project_root();
     let python = resolve_python(&root);
@@ -235,7 +262,14 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![restart_agent, stop_agent, get_settings, save_settings])
+        .invoke_handler(tauri::generate_handler![
+            restart_agent,
+            stop_agent,
+            get_settings,
+            save_settings,
+            pick_directory,
+            pick_file
+        ])
         .build(tauri::generate_context!())
         .expect("error building UNLZ Agent")
         .run(|app_handle, event| {

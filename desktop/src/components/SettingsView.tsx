@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
-import { Save, Settings, RotateCcw, RefreshCw } from "lucide-react";
-import { getSettings, saveSettings, listGgufModels } from "../lib/api";
-import type { GgufModel } from "../lib/api";
+import { Save, Settings, RotateCcw, RefreshCw, FolderOpen, FileSearch, Download } from "lucide-react";
+import {
+  getSettings,
+  saveSettings,
+  listGgufModels,
+  pickDirectory,
+  pickFile,
+  getLlamacppInstallerStatus,
+  runLlamacppInstaller,
+} from "../lib/api";
+import type { GgufModel, LlamacppInstallerStatus } from "../lib/api";
 
 type Config = Record<string, string>;
 
@@ -46,18 +54,20 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-function Input({ value, onChange, placeholder, type = "text", mono = false }: {
+function Input({ value, onChange, placeholder, type = "text", mono = false, readOnly = false }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
   mono?: boolean;
+  readOnly?: boolean;
 }) {
   return (
     <input
       type={type}
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      readOnly={readOnly}
       placeholder={placeholder}
       className={`input-field w-full px-3 py-2 text-sm ${mono ? "font-mono" : ""}`}
     />
@@ -123,6 +133,8 @@ export default function SettingsView() {
   const [toast, setToast] = useState("");
   const [ggufModels, setGgufModels] = useState<GgufModel[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [installerStatus, setInstallerStatus] = useState<LlamacppInstallerStatus | null>(null);
+  const [installerBusy, setInstallerBusy] = useState(false);
 
   useEffect(() => {
     getSettings()
@@ -135,11 +147,25 @@ export default function SettingsView() {
     refreshGgufModels();
   }, [config.LLM_PROVIDER, config.LLAMACPP_MODELS_DIR, config.LLAMACPP_MODEL_PATH]);
 
+  useEffect(() => {
+    if ((config.LLM_PROVIDER || "llamacpp") !== "llamacpp") return;
+    refreshInstallerStatus();
+  }, [config.LLM_PROVIDER, config.LLAMACPP_EXECUTABLE]);
+
   async function refreshGgufModels() {
     setLoadingModels(true);
     const models = await listGgufModels();
     setGgufModels(models);
     setLoadingModels(false);
+  }
+
+  async function refreshInstallerStatus() {
+    try {
+      const status = await getLlamacppInstallerStatus();
+      setInstallerStatus(status);
+    } catch {
+      setInstallerStatus(null);
+    }
   }
 
   const set = (key: string, val: string) => setConfig((c) => ({ ...c, [key]: val }));
@@ -158,6 +184,33 @@ export default function SettingsView() {
       showToast(`Save failed: ${e}`);
     }
     setSaving(false);
+  }
+
+  async function chooseModelsDir() {
+    const picked = await pickDirectory();
+    if (!picked) return;
+    set("LLAMACPP_MODELS_DIR", picked);
+  }
+
+  async function chooseLlamaServerExe() {
+    const picked = await pickFile("Executables", ["exe"]);
+    if (!picked) return;
+    set("LLAMACPP_EXECUTABLE", picked);
+  }
+
+  async function installOrUpdateLlamacpp() {
+    setInstallerBusy(true);
+    try {
+      const result = await runLlamacppInstaller();
+      const next = await getSettings();
+      setConfig((prev) => ({ ...prev, ...next }));
+      await refreshInstallerStatus();
+      showToast(`llama.cpp listo (${result.installed_version || "latest"})`);
+    } catch (e) {
+      showToast(`No se pudo instalar/actualizar llama.cpp: ${e}`);
+    } finally {
+      setInstallerBusy(false);
+    }
   }
 
   const provider = config.LLM_PROVIDER || "ollama";
@@ -325,20 +378,69 @@ export default function SettingsView() {
         {provider === "llamacpp" && (
           <Section title="llama.cpp">
             <Field label="Directorio de modelos" hint="Raíz donde se escanean los .gguf (subdirectorios incluidos)">
-              <Input
-                value={config.LLAMACPP_MODELS_DIR ?? ""}
-                onChange={(v) => set("LLAMACPP_MODELS_DIR", v)}
-                placeholder="C:\Users\...\Models\llamacpp"
-                mono
-              />
+              <div className="flex gap-2">
+                <Input
+                  value={config.LLAMACPP_MODELS_DIR ?? ""}
+                  onChange={() => {}}
+                  placeholder="C:\Users\...\Models\llamacpp"
+                  mono
+                  readOnly
+                />
+                <button
+                  type="button"
+                  onClick={chooseModelsDir}
+                  className="btn-ghost px-2.5 py-2 shrink-0 flex items-center gap-1 text-xs"
+                  title="Seleccionar carpeta de modelos"
+                >
+                  <FolderOpen size={13} />
+                </button>
+              </div>
             </Field>
             <Field label="llama-server.exe" hint="Path to the llama-server executable">
-              <Input
-                value={config.LLAMACPP_EXECUTABLE}
-                onChange={(v) => set("LLAMACPP_EXECUTABLE", v)}
-                placeholder="C:\path\to\llama-server.exe"
-                mono
-              />
+              <div className="flex gap-2">
+                <Input
+                  value={config.LLAMACPP_EXECUTABLE}
+                  onChange={() => {}}
+                  placeholder="C:\path\to\llama-server.exe"
+                  mono
+                  readOnly
+                />
+                <button
+                  type="button"
+                  onClick={chooseLlamaServerExe}
+                  className="btn-ghost px-2.5 py-2 shrink-0 flex items-center gap-1 text-xs"
+                  title="Seleccionar llama-server.exe"
+                >
+                  <FileSearch size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={installOrUpdateLlamacpp}
+                  disabled={installerBusy || (installerStatus?.supported === false)}
+                  className="btn-ghost px-2.5 py-2 shrink-0 flex items-center gap-1 text-xs disabled:opacity-40"
+                  title={
+                    installerStatus?.update_available
+                      ? "Actualizar llama.cpp"
+                      : "Instalar llama.cpp"
+                  }
+                >
+                  <Download size={13} className={installerBusy ? "animate-bounce" : ""} />
+                  {installerBusy
+                    ? "Procesando..."
+                    : installerStatus?.update_available
+                      ? "Actualizar llama.cpp"
+                      : "Instalar llama.cpp"}
+                </button>
+              </div>
+              <p className="text-[10px] text-muted mt-1">
+                {installerStatus?.supported === false
+                  ? (installerStatus.reason || "Instalador no disponible")
+                  : installerStatus?.update_available
+                    ? `Nueva versión disponible: ${installerStatus.latest_version} (instalada: ${installerStatus.installed_version || "desconocida"})`
+                    : installerStatus?.installed
+                      ? `llama.cpp instalado${installerStatus.installed_version ? ` (${installerStatus.installed_version})` : ""}`
+                      : "llama.cpp no detectado. Podés instalarlo automáticamente con el botón."}
+              </p>
             </Field>
             <Field
               label="Model (.gguf)"

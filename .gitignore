@@ -37,3 +37,5 @@ mcp.json
 
 # Logs
 *.log
+dist-single-exe/UNLZ-Agent-Setup.exe
+desktop/src-tauri/binaries/agent_server.exe

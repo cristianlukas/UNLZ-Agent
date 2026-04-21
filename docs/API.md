@@ -13,6 +13,10 @@ Reads `.env` key/value pairs.
 ### `POST /settings`
 Persists uppercase config keys into `.env` and reloads env values.
 
+Desktop (Tauri) helpers used by Settings UI:
+- `pick_directory` (native folder picker)
+- `pick_file` (native file picker, used for `llama-server.exe`)
+
 ## Chat
 
 ### `POST /chat`
@@ -81,6 +85,15 @@ Stops managed llama.cpp process.
 
 ### `GET /llamacpp/status`
 Returns process state, PID (if managed), URL and model info.
+
+### `GET /llamacpp/installer/status`
+Returns install/update state for llama.cpp:
+- `installed`, `installed_version`
+- `latest_version`, `update_available`
+- detected executable path and support status
+
+### `POST /llamacpp/installer/run`
+Downloads latest compatible Windows llama.cpp release, extracts it under `tools/llama.cpp`, and auto-configures `.env` (`LLAMACPP_EXECUTABLE`, provider and base defaults).
 
 ### `GET /models/gguf`
 Scans known roots for `.gguf` models and returns metadata.
