@@ -63,6 +63,7 @@ Notas:
 
 Salida esperada:
 - `dist-single-exe\UNLZ-Agent-Setup.exe`
+- `UNLZ-Agent-Setup.exe` (copia directa en la raíz del repo)
 
 Este instalador incluye modo offline para WebView2 y despliega internamente app + backend.
 

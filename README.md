@@ -105,6 +105,7 @@ Desde la raíz del repo:
 
 Genera un instalador único en:
 - `dist-single-exe\UNLZ-Agent-Setup.exe`
+- `UNLZ-Agent-Setup.exe` (copiado también en la raíz del proyecto)
 
 Características del instalador:
 - archivo único para distribuir

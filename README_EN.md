@@ -105,6 +105,7 @@ From repository root:
 
 This generates a single installer at:
 - `dist-single-exe\UNLZ-Agent-Setup.exe`
+- `UNLZ-Agent-Setup.exe` (also copied to project root)
 
 Installer behavior:
 - one file to distribute

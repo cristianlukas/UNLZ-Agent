@@ -63,6 +63,7 @@ Notes:
 
 Expected output:
 - `dist-single-exe\UNLZ-Agent-Setup.exe`
+- `UNLZ-Agent-Setup.exe` (direct copy at repo root)
 
 This installer uses offline WebView2 mode and deploys app + backend sidecar internally.
 

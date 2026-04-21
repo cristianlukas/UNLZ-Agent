@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
+#[cfg(debug_assertions)]
+use std::process::Stdio;
 use std::sync::Mutex;
 use tauri::Manager;
 
