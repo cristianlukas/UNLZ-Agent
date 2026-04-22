@@ -24,9 +24,12 @@ jobs:
 
   desktop:
     runs-on: windows-latest
+    env:
+      NPM_CONFIG_SCRIPT_SHELL: C:\Windows\System32\cmd.exe
     defaults:
       run:
         working-directory: desktop
+        shell: cmd
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

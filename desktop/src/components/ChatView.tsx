@@ -645,7 +645,11 @@ function ActiveChat({ convId }: { convId: string }) {
             runId: event.run_id,
           });
         } else if (event.type === "step") {
-          setStreamPhase("tools");
+          if ((event.text || "").startsWith("task_router")) {
+            setStreamPhase("routing");
+          } else {
+            setStreamPhase("tools");
+          }
           upsertMessage(convId, {
             ...assistantMsg,
             steps: [

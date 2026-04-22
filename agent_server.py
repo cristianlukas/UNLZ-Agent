@@ -342,6 +342,34 @@ def _is_action_request(text: str) -> bool:
     return any(k in t for k in keywords)
 
 
+def _is_smalltalk_request(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not t:
+        return False
+    smalltalk_tokens = (
+        "hola",
+        "buenas",
+        "buen día",
+        "buen dia",
+        "buenas tardes",
+        "buenas noches",
+        "qué tal",
+        "que tal",
+        "como estas",
+        "cómo estás",
+        "como va",
+        "cómo va",
+        "hello",
+        "hi",
+        "hey",
+        "how are you",
+        "good morning",
+        "good afternoon",
+        "good evening",
+    )
+    return any(tok in t for tok in smalltalk_tokens)
+
+
 def _tools_for_message(text: str) -> list[dict]:
     # Expose terminal execution only for explicit action intents.
     if _is_action_request(text):
@@ -2003,7 +2031,12 @@ async def _agent_stream_normal(
         })
     messages.append({"role": "user", "content": message})
 
-    available_tools = _tools_for_message(message)
+    # Fast-path for greetings/chit-chat: avoid unnecessary tool-calling latency.
+    if _is_smalltalk_request(message):
+        available_tools = []
+        force_tools = False
+    else:
+        available_tools = _tools_for_message(message)
     if _safe_folder_id(folder_id):
         available_tools = [
             t for t in available_tools
