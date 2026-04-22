@@ -1031,7 +1031,7 @@ class ChatRequest(BaseModel):
     system_prompt: str = ""         # override default system prompt (from Behavior)
     folder_id: str = ""             # optional folder scope for folder-only docs
     sandbox_root: str = ""          # optional folder sandbox path (enforced for command/file ops)
-    mode: str = "normal"            # normal | plan | iterate
+    mode: str = "normal"            # normal | plan | iterate | simple
     conversation_id: str = ""
     dry_run: bool = False
 
@@ -1980,6 +1980,7 @@ async def _agent_stream_normal(
     sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
+    simple_chat: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Multi-step tool-calling agent. Yields SSE data lines.
@@ -2030,6 +2031,63 @@ async def _agent_stream_normal(
             ),
         })
     messages.append({"role": "user", "content": message})
+
+    # Simple mode: answer directly with no tool-calling.
+    if simple_chat:
+        try:
+            stream, model_used, retries, _errors = await _chat_create_with_fallback(
+                client,
+                model_chain,
+                messages=messages,
+                stream=True,
+                timeout=120,
+            )
+            llm_retries_total += retries
+            if retries > 0:
+                yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used, 'retries': retries}})}\n\n"
+            async for chunk in stream:
+                chunk_choices = getattr(chunk, "choices", None)
+                if not chunk_choices:
+                    continue
+                delta = getattr(chunk_choices[0], "delta", None)
+                delta_content = getattr(delta, "content", None) if delta else None
+                if delta_content:
+                    final_chunks.append(delta_content)
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': delta_content})}\n\n"
+                    await asyncio.sleep(0)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'text': f'Simple chat error: {e}'})}\n\n"
+            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "simple", str(e))
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
+        final_text = "".join(final_chunks)
+        confidence = _confidence_from_context(
+            tool_calls=0,
+            had_errors=False,
+            research_request=False,
+            answer_text=final_text,
+            web_result_text="",
+        )
+        yield f"data: {json.dumps({'type': 'confidence', 'score': confidence, 'tool_calls': 0})}\n\n"
+        if conversation_id:
+            try:
+                fid = _safe_folder_id(folder_id)
+                _append_memory(conversation_id, fid, "user", message)
+                _append_memory(conversation_id, fid, "assistant", final_text)
+            except Exception:
+                pass
+        _record_router_metric(
+            task_area,
+            model_used,
+            True,
+            int((time.time() - started_at) * 1000),
+            llm_retries_total,
+            "simple",
+            route_reason,
+        )
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
 
     # Fast-path for greetings/chit-chat: avoid unnecessary tool-calling latency.
     if _is_smalltalk_request(message):
@@ -2631,6 +2689,10 @@ async def _agent_stream(
         return
     if m == "iterate":
         async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):
+            yield ev
+        return
+    if m == "simple":
+        async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True)):
             yield ev
         return
     async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):

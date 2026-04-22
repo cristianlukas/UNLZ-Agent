@@ -11,7 +11,7 @@ import unlzLogo from "../assets/unlz-logo.png";
 
 let _msgId = Date.now();
 const uid = () => String(++_msgId);
-type SendMode = "normal" | "plan" | "iterate";
+type SendMode = "normal" | "plan" | "iterate" | "simple";
 type StreamPhase = "sending" | "routing" | "tools" | "generating";
 
 // ─── Tool step ────────────────────────────────────────────────────────────────
@@ -501,6 +501,7 @@ function ActiveChat({ convId }: { convId: string }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [iteratorMode, setIteratorMode] = useState(false);
+  const [simpleMode, setSimpleMode] = useState(false);
   const [planArmed, setPlanArmed] = useState(false);
   const [planWorkflowActive, setPlanWorkflowActive] = useState(false);
   const [commandBusyByMsgId, setCommandBusyByMsgId] = useState<Record<string, boolean>>({});
@@ -566,6 +567,7 @@ function ActiveChat({ convId }: { convId: string }) {
     setEditingId(null);
     setEditingText("");
     setIteratorMode(false);
+    setSimpleMode(false);
     setPlanArmed(false);
     setPlanWorkflowActive(false);
     const draft = consumePendingDraft(convId);
@@ -858,6 +860,8 @@ function ActiveChat({ convId }: { convId: string }) {
       }
     } else if (iteratorMode) {
       mode = "iterate";
+    } else if (simpleMode) {
+      mode = "simple";
     }
     await streamAssistantReply(text, history, mode);
   }
@@ -1100,6 +1104,19 @@ function ActiveChat({ convId }: { convId: string }) {
             title="Modo agente iterador"
           >
             Iterador
+          </button>
+          <button
+            onClick={() => setSimpleMode((p) => !p)}
+            aria-pressed={simpleMode}
+            disabled={uiLocked}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              simpleMode
+                ? "border-sky-500/50 text-sky-300 bg-sky-500/15"
+                : "border-border text-muted hover:text-primary hover:bg-surface-2"
+            } disabled:opacity-40`}
+            title="Respuesta directa del modelo (sin usar herramientas)"
+          >
+            Chat simple
           </button>
           <button
             onClick={handleToggleExecutionMode}
