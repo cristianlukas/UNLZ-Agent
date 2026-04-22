@@ -2,3 +2,5 @@
 {"ts": "2026-04-21T16:49:49", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": false, "latency_ms": 12745, "retries": 0, "mode": "normal", "reason": "keyword default"}
 {"ts": "2026-04-21T17:08:22", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": false, "latency_ms": 56477, "retries": 0, "mode": "normal", "reason": "keyword default"}
 {"ts": "2026-04-21T21:14:59", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": true, "latency_ms": 67255, "retries": 0, "mode": "normal", "reason": "keyword matches=1"}
+{"ts": "2026-04-21T21:26:23", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": true, "latency_ms": 22972, "retries": 0, "mode": "normal", "reason": "keyword matches=1"}
+{"ts": "2026-04-21T21:54:20", "area": "chat_general", "model": "gemma-3-4b-it-q4_0", "success": true, "latency_ms": 45002, "retries": 0, "mode": "simple", "reason": "keyword matches=1"}

@@ -28,6 +28,8 @@ export interface Behavior {
   name: string;
   content: string;      // Markdown / plain text — the system prompt
   icon?: string;        // emoji shorthand
+  model?: string;       // optional model alias/id override for this behavior
+  harness?: string;     // optional harness override for this behavior
   createdAt: number;
   updatedAt: number;
 }

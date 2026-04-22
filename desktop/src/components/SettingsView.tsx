@@ -12,9 +12,12 @@ import {
   saveTaskRouterConfig,
   getTaskRouterMetrics,
   recalibrateTaskRouter,
+  getHarnessesStatus,
+  installHarness,
 } from "../lib/api";
 import type {
   GgufModel,
+  HarnessesStatus,
   LlamacppInstallerStatus,
   TaskRouterConfig,
   TaskRouterMetrics,
@@ -25,6 +28,9 @@ type Config = Record<string, string>;
 const DEFAULTS: Config = {
   LLM_PROVIDER: "llamacpp",
   AGENT_LANGUAGE: "es",
+  AGENT_HARNESS: "native",
+  HARNESS_CLAUDE_CODE_BIN: "",
+  HARNESS_OPENCODE_BIN: "",
   AGENT_EXECUTION_MODE: "confirm",
   AGENT_COMMAND_TIMEOUT_SEC: "60",
   WEB_SEARCH_ENGINE: "google",
@@ -179,6 +185,8 @@ export default function SettingsView() {
   const [routerMetrics, setRouterMetrics] = useState<TaskRouterMetrics | null>(null);
   const [routerBusy, setRouterBusy] = useState(false);
   const [routerMinSamples, setRouterMinSamples] = useState("12");
+  const [harnesses, setHarnesses] = useState<HarnessesStatus | null>(null);
+  const [harnessBusy, setHarnessBusy] = useState(false);
   const [routerSearch, setRouterSearch] = useState("");
   const [newRouterArea, setNewRouterArea] = useState("");
   const _routerPrefs = readRouterMetricsPrefs();
@@ -199,6 +207,9 @@ export default function SettingsView() {
       .catch(() => { /* backend offline */ });
     getTaskRouterMetrics()
       .then((m) => setRouterMetrics(m))
+      .catch(() => { /* backend offline */ });
+    getHarnessesStatus()
+      .then((h) => setHarnesses(h))
       .catch(() => { /* backend offline */ });
   }, []);
 
@@ -293,6 +304,60 @@ export default function SettingsView() {
       showToast(`No se pudo instalar/actualizar llama.cpp: ${e}`);
     } finally {
       setInstallerBusy(false);
+    }
+  }
+
+  async function refreshHarnessesStatus() {
+    try {
+      const h = await getHarnessesStatus();
+      setHarnesses(h);
+    } catch {
+      setHarnesses(null);
+    }
+  }
+
+  async function installLittleCoderHarness() {
+    setHarnessBusy(true);
+    try {
+      const out = await installHarness("little-coder");
+      set("AGENT_HARNESS", "little-coder");
+      set("HARNESS_LITTLE_CODER_DIR", out.path || "");
+      await refreshHarnessesStatus();
+      showToast(`little-coder instalado (${out.version || "main"})`);
+    } catch (e) {
+      showToast(`No se pudo instalar little-coder: ${e}`);
+    } finally {
+      setHarnessBusy(false);
+    }
+  }
+
+  async function installClaudeCodeHarness() {
+    setHarnessBusy(true);
+    try {
+      const out = await installHarness("claude-code");
+      set("AGENT_HARNESS", "claude-code");
+      if (out.path) set("HARNESS_CLAUDE_CODE_BIN", out.path);
+      await refreshHarnessesStatus();
+      showToast(`claude-code instalado${out.version ? ` (${out.version})` : ""}`);
+    } catch (e) {
+      showToast(`No se pudo instalar claude-code: ${e}`);
+    } finally {
+      setHarnessBusy(false);
+    }
+  }
+
+  async function installOpenCodeHarness() {
+    setHarnessBusy(true);
+    try {
+      const out = await installHarness("opencode");
+      set("AGENT_HARNESS", "opencode");
+      if (out.path) set("HARNESS_OPENCODE_BIN", out.path);
+      await refreshHarnessesStatus();
+      showToast(`opencode instalado${out.version ? ` (${out.version})` : ""}`);
+    } catch (e) {
+      showToast(`No se pudo instalar opencode: ${e}`);
+    } finally {
+      setHarnessBusy(false);
     }
   }
 
@@ -392,6 +457,23 @@ export default function SettingsView() {
   }
 
   const provider = config.LLM_PROVIDER || "ollama";
+  const harnessOptions = (harnesses?.options && harnesses.options.length > 0)
+    ? harnesses.options.map((h) => ({
+        value: h.id,
+        label: h.installed ? `${h.label}${h.version ? ` (${h.version})` : ""}` : `${h.label} (no instalado)`,
+      }))
+    : [
+        { value: "native", label: "UNLZ-AGENT nativo" },
+        { value: "claude-code", label: "claude-code" },
+        { value: "opencode", label: "opencode" },
+        { value: "little-coder", label: "little-coder (no instalado)" },
+      ];
+  const littleCoderMeta = harnesses?.options?.find((h) => h.id === "little-coder");
+  const littleCoderInstalled = !!littleCoderMeta?.installed;
+  const claudeCodeMeta = harnesses?.options?.find((h) => h.id === "claude-code");
+  const claudeCodeInstalled = !!claudeCodeMeta?.installed;
+  const openCodeMeta = harnesses?.options?.find((h) => h.id === "opencode");
+  const openCodeInstalled = !!openCodeMeta?.installed;
   const resolvedLlamacppExecutable = (config.LLAMACPP_EXECUTABLE || installerStatus?.executable || "").trim();
   const controlsOrder = config.WINDOW_CONTROLS_ORDER || "minimize,maximize,close";
   const filteredRouterAreas = Object.entries(routerConfig.areas || {}).filter(([area, cfg]) => {
@@ -543,6 +625,101 @@ export default function SettingsView() {
         </Section>
 
         <Section title="Agent Actions">
+          <Field label="Harness" hint="Define el scaffold del agente. 'UNLZ-AGENT nativo' mantiene el comportamiento actual; 'claude-code' y 'opencode' priorizan flujo de coding agent; 'little-coder' aplica un perfil optimizado para modelos locales de código.">
+            <div className="space-y-2">
+              <Select
+                value={config.AGENT_HARNESS || "native"}
+                onChange={(v) => {
+                  if (v === "opencode" && !openCodeInstalled) {
+                    showToast("opencode no está instalado todavía");
+                    return;
+                  }
+                  if (v === "claude-code" && !claudeCodeInstalled) {
+                    showToast("claude-code no está instalado todavía");
+                    return;
+                  }
+                  if (v === "little-coder" && !littleCoderInstalled) {
+                    showToast("little-coder no está instalado todavía");
+                    return;
+                  }
+                  set("AGENT_HARNESS", v);
+                }}
+                options={harnessOptions}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={installOpenCodeHarness}
+                  disabled={harnessBusy}
+                  className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Download size={12} className={harnessBusy ? "animate-bounce" : ""} />
+                  {harnessBusy
+                    ? "Instalando..."
+                    : openCodeInstalled
+                      ? "Reinstalar / actualizar opencode"
+                      : "Instalar opencode"}
+                </button>
+                <button
+                  type="button"
+                  onClick={installClaudeCodeHarness}
+                  disabled={harnessBusy}
+                  className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Download size={12} className={harnessBusy ? "animate-bounce" : ""} />
+                  {harnessBusy
+                    ? "Instalando..."
+                    : claudeCodeInstalled
+                      ? "Reinstalar / actualizar claude-code"
+                      : "Instalar claude-code"}
+                </button>
+                <button
+                  type="button"
+                  onClick={installLittleCoderHarness}
+                  disabled={harnessBusy}
+                  className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1 disabled:opacity-40"
+                >
+                  <Download size={12} className={harnessBusy ? "animate-bounce" : ""} />
+                  {harnessBusy
+                    ? "Instalando..."
+                    : littleCoderInstalled
+                      ? "Reinstalar / actualizar little-coder"
+                      : "Instalar little-coder"}
+                </button>
+                <button
+                  type="button"
+                  onClick={refreshHarnessesStatus}
+                  disabled={harnessBusy}
+                  className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1 disabled:opacity-40"
+                  title="Refrescar estado de harnesses"
+                >
+                  <RefreshCw size={12} />
+                  Reanalizar
+                </button>
+              </div>
+              <p className="text-[10px] text-muted font-mono truncate">
+                {(() => {
+                  const active = (config.AGENT_HARNESS || "native").trim().toLowerCase();
+                  if (active === "opencode") {
+                    return openCodeInstalled
+                      ? (openCodeMeta?.path || config.HARNESS_OPENCODE_BIN || "opencode instalado")
+                      : "opencode no instalado";
+                  }
+                  if (active === "claude-code") {
+                    return claudeCodeInstalled
+                      ? (claudeCodeMeta?.path || config.HARNESS_CLAUDE_CODE_BIN || "claude-code instalado")
+                      : "claude-code no instalado";
+                  }
+                  if (active === "little-coder") {
+                    return littleCoderInstalled
+                      ? (littleCoderMeta?.path || config.HARNESS_LITTLE_CODER_DIR || "little-coder instalado")
+                      : "little-coder no instalado";
+                  }
+                  return "UNLZ-AGENT nativo (sin instalación externa)";
+                })()}
+              </p>
+            </div>
+          </Field>
           <Field label="Execution mode" hint="confirm: pregunta antes de ejecutar comandos. autonomous: ejecuta directamente.">
             <Select
               value={config.AGENT_EXECUTION_MODE || "confirm"}

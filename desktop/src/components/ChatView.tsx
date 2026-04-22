@@ -507,6 +507,7 @@ function ActiveChat({ convId }: { convId: string }) {
   const [commandBusyByMsgId, setCommandBusyByMsgId] = useState<Record<string, boolean>>({});
   const [autonomousExec, setAutonomousExec] = useState(false);
   const [execModeBusy, setExecModeBusy] = useState(false);
+  const [globalHarness, setGlobalHarness] = useState("native");
   const [streamPhase, setStreamPhase] = useState<StreamPhase>("sending");
 
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -551,6 +552,36 @@ function ActiveChat({ convId }: { convId: string }) {
     return chunks.join("\n\n");
   }
 
+  function buildModelOverride(): string {
+    const fromBehavior = (behavior?.model || "").trim();
+    if (fromBehavior) return fromBehavior;
+    if (activeFolder?.behaviorId) {
+      const fb = behaviors.find((b) => b.id === activeFolder.behaviorId);
+      const fromFolderBehavior = (fb?.model || "").trim();
+      if (fromFolderBehavior) return fromFolderBehavior;
+    }
+    return "";
+  }
+
+  function buildHarnessOverride(): string {
+    const fromBehavior = (behavior?.harness || "").trim();
+    if (fromBehavior) return fromBehavior;
+    if (activeFolder?.behaviorId) {
+      const fb = behaviors.find((b) => b.id === activeFolder.behaviorId);
+      const fromFolderBehavior = (fb?.harness || "").trim();
+      if (fromFolderBehavior) return fromFolderBehavior;
+    }
+    return "";
+  }
+
+  const effectiveHarness = (buildHarnessOverride() || globalHarness || "native").trim().toLowerCase();
+  const harnessToggleSupport = {
+    plan: effectiveHarness === "native",
+    iterate: effectiveHarness === "native",
+    simple: effectiveHarness === "native",
+    executionMode: effectiveHarness === "native",
+  };
+
   const scrollToBottom = useCallback((smooth = true) => {
     bottomRef.current?.scrollIntoView({ behavior: smooth ? "smooth" : "auto" });
   }, []);
@@ -587,13 +618,24 @@ function ActiveChat({ convId }: { convId: string }) {
       .then((cfg) => {
         if (cancelled) return;
         const mode = String(cfg.AGENT_EXECUTION_MODE ?? "confirm").trim().toLowerCase();
+        const harness = String(cfg.AGENT_HARNESS ?? "native").trim().toLowerCase();
         setAutonomousExec(mode === "autonomous");
+        setGlobalHarness(harness || "native");
       })
       .catch(() => {
-        if (!cancelled) setAutonomousExec(false);
+        if (!cancelled) {
+          setAutonomousExec(false);
+          setGlobalHarness("native");
+        }
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!harnessToggleSupport.plan) setPlanArmed(false);
+    if (!harnessToggleSupport.iterate) setIteratorMode(false);
+    if (!harnessToggleSupport.simple) setSimpleMode(false);
+  }, [harnessToggleSupport.plan, harnessToggleSupport.iterate, harnessToggleSupport.simple]);
 
   function setConversationMessages(nextMessages: ChatMessage[]) {
     useStore.setState((s) => ({
@@ -621,7 +663,7 @@ function ActiveChat({ convId }: { convId: string }) {
     };
 
     upsertMessage(convId, assistantMsg);
-    setStreamPhase("sending");
+    setStreamPhase(mode === "simple" ? "generating" : "sending");
     setIsStreaming(true);
     setTimeout(() => scrollToBottom(false), 0);
 
@@ -630,6 +672,8 @@ function ActiveChat({ convId }: { convId: string }) {
         prompt,
         historyForModel,
         buildSystemPrompt(),
+        buildModelOverride(),
+        buildHarnessOverride(),
         conv?.folderId,
         activeFolder?.sandboxPath,
         mode,
@@ -637,7 +681,7 @@ function ActiveChat({ convId }: { convId: string }) {
         false
       )) {
         if (event.type === "run") {
-          setStreamPhase("routing");
+          setStreamPhase(mode === "simple" ? "generating" : "routing");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -647,7 +691,13 @@ function ActiveChat({ convId }: { convId: string }) {
             runId: event.run_id,
           });
         } else if (event.type === "step") {
-          if ((event.text || "").startsWith("task_router")) {
+          const isTaskRouterStep = (event.text || "").startsWith("task_router");
+          if (mode === "simple" && isTaskRouterStep) {
+            // In simple mode we hide router internals from UI and keep direct generation state.
+            setStreamPhase("generating");
+            continue;
+          }
+          if (isTaskRouterStep) {
             setStreamPhase("routing");
           } else {
             setStreamPhase("tools");
@@ -1079,62 +1129,68 @@ function ActiveChat({ convId }: { convId: string }) {
           </div>
         )}
         <div className="flex items-center gap-2 mb-2">
-          <button
-            onClick={() => setPlanArmed((p) => !p)}
-            aria-pressed={planArmed}
-            disabled={uiLocked}
-            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-              planArmed
-                ? "border-accent/50 text-accent bg-accent/15"
-                : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            } disabled:opacity-40`}
-            title="Afecta solo al primer envío de esta conversación"
-          >
-            Modo Plan
-          </button>
-          <button
-            onClick={() => setIteratorMode((p) => !p)}
-            aria-pressed={iteratorMode}
-            disabled={uiLocked}
-            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-              iteratorMode
-                ? "border-accent/50 text-accent bg-accent/15"
-                : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            } disabled:opacity-40`}
-            title="Modo agente iterador"
-          >
-            Iterador
-          </button>
-          <button
-            onClick={() => setSimpleMode((p) => !p)}
-            aria-pressed={simpleMode}
-            disabled={uiLocked}
-            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-              simpleMode
-                ? "border-sky-500/50 text-sky-300 bg-sky-500/15"
-                : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            } disabled:opacity-40`}
-            title="Respuesta directa del modelo (sin usar herramientas)"
-          >
-            Chat simple
-          </button>
-          <button
-            onClick={handleToggleExecutionMode}
-            aria-pressed={autonomousExec}
-            disabled={execModeBusy || uiLocked}
-            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
-              autonomousExec
-                ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/15"
-                : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            }`}
-            title="Activa o desactiva ejecutar sin preguntar"
-          >
-            {execModeBusy
-              ? "Actualizando..."
-              : autonomousExec
-                ? "Sin preguntar"
-                : "Preguntar antes"}
-          </button>
+          {harnessToggleSupport.plan && (
+            <button
+              onClick={() => setPlanArmed((p) => !p)}
+              aria-pressed={planArmed}
+              disabled={uiLocked}
+              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                planArmed
+                  ? "border-accent/50 text-accent bg-accent/15"
+                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
+              } disabled:opacity-40`}
+              title="Afecta solo al primer envío de esta conversación"
+            >
+              Modo Plan
+            </button>
+          )}
+          {harnessToggleSupport.iterate && (
+            <button
+              onClick={() => setIteratorMode((p) => !p)}
+              aria-pressed={iteratorMode}
+              disabled={uiLocked}
+              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                iteratorMode
+                  ? "border-accent/50 text-accent bg-accent/15"
+                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
+              } disabled:opacity-40`}
+              title="Modo agente iterador"
+            >
+              Modo Iterador
+            </button>
+          )}
+          {harnessToggleSupport.simple && (
+            <button
+              onClick={() => setSimpleMode((p) => !p)}
+              aria-pressed={simpleMode}
+              disabled={uiLocked}
+              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+                simpleMode
+                  ? "border-sky-500/50 text-sky-300 bg-sky-500/15"
+                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
+              } disabled:opacity-40`}
+              title="Respuesta directa del modelo (sin usar herramientas)"
+            >
+              Modo Chat Simple
+            </button>
+          )}
+          {harnessToggleSupport.executionMode && (
+            <button
+              onClick={handleToggleExecutionMode}
+              aria-pressed={autonomousExec}
+              disabled={execModeBusy || uiLocked}
+              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
+                autonomousExec
+                  ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/15"
+                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
+              }`}
+              title="Activa o desactiva ejecutar sin preguntar"
+            >
+              {execModeBusy
+                ? "Actualizando..."
+                : "Modo Sin Preguntar"}
+            </button>
+          )}
           {planWorkflowActive && (
             <>
               <button

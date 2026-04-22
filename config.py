@@ -21,6 +21,10 @@ class Config:
     VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").lower()  # chroma | supabase
     LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()              # ollama | openai | llamacpp
     AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "en").lower()              # en | es | zh
+    AGENT_HARNESS = os.getenv("AGENT_HARNESS", "native").lower()           # native | little-coder | claude-code | opencode
+    HARNESS_LITTLE_CODER_DIR = os.getenv("HARNESS_LITTLE_CODER_DIR", "")
+    HARNESS_CLAUDE_CODE_BIN = os.getenv("HARNESS_CLAUDE_CODE_BIN", "")
+    HARNESS_OPENCODE_BIN = os.getenv("HARNESS_OPENCODE_BIN", "")
     MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
     AGENT_EXECUTION_MODE = os.getenv("AGENT_EXECUTION_MODE", "confirm").lower()  # confirm | autonomous
     AGENT_COMMAND_TIMEOUT_SEC = int(os.getenv("AGENT_COMMAND_TIMEOUT_SEC", "60"))
@@ -69,6 +73,8 @@ class Config:
     def validate():
         if Config.AGENT_EXECUTION_MODE not in ("confirm", "autonomous"):
             raise ValueError("AGENT_EXECUTION_MODE must be 'confirm' or 'autonomous'")
+        if Config.AGENT_HARNESS not in ("native", "little-coder", "claude-code", "opencode"):
+            raise ValueError("AGENT_HARNESS must be 'native', 'little-coder', 'claude-code' or 'opencode'")
         if Config.WEB_SEARCH_ENGINE not in ("google", "duckduckgo", "serpapi", "bing", "fusion", "auto"):
             raise ValueError("WEB_SEARCH_ENGINE must be one of: google, duckduckgo, serpapi, bing, fusion, auto")
 

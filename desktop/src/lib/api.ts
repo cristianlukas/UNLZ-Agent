@@ -17,6 +17,8 @@ export async function* streamChat(
   message: string,
   history: Array<{ role: string; content: string }>,
   systemPrompt?: string,
+  modelOverride?: string,
+  harnessOverride?: string,
   folderId?: string,
   sandboxRoot?: string,
   mode: "normal" | "plan" | "iterate" | "simple" = "normal",
@@ -30,6 +32,8 @@ export async function* streamChat(
       message,
       history,
       system_prompt: systemPrompt ?? "",
+      model_override: modelOverride ?? "",
+      harness_override: harnessOverride ?? "",
       folder_id: folderId ?? "",
       sandbox_root: sandboxRoot ?? "",
       mode,
@@ -267,6 +271,44 @@ export async function runApprovedWindowsCommand(payload: {
   if (!res.ok) {
     throw new Error(await res.text());
   }
+  return res.json();
+}
+
+// ─── Harnesses ───────────────────────────────────────────────────────────────
+
+export interface HarnessOption {
+  id: string;
+  label: string;
+  installed: boolean;
+  version?: string;
+  path?: string;
+}
+
+export interface HarnessesStatus {
+  active: string;
+  options: HarnessOption[];
+}
+
+export interface HarnessInstallResult {
+  status: string;
+  harness_id: string;
+  path: string;
+  version?: string;
+}
+
+export async function getHarnessesStatus(): Promise<HarnessesStatus> {
+  const res = await fetch(`${BASE}/harnesses/status`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function installHarness(harnessId: string): Promise<HarnessInstallResult> {
+  const res = await fetch(`${BASE}/harnesses/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ harness_id: harnessId }),
+  });
+  if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 

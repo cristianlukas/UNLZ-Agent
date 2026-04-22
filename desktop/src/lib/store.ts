@@ -25,6 +25,8 @@ const DEFAULT_BEHAVIORS: Behavior[] = [
 Tenés acceso a herramientas: búsqueda de conocimiento local (RAG), búsqueda web, hora, stats del sistema.
 Usá las herramientas proactivamente para responder con precisión.
 Formateá las respuestas en Markdown. Sé conciso y preciso.`,
+    model: "",
+    harness: "",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -36,6 +38,8 @@ Formateá las respuestas en Markdown. Sé conciso y preciso.`,
 Respondé siempre con código limpio, bien comentado y con explicaciones concisas.
 Preferí TypeScript, Python o Rust según el contexto.
 Formateá el código con bloques de código con el lenguaje indicado.`,
+    model: "",
+    harness: "claude-code",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -47,10 +51,69 @@ Formateá el código con bloques de código con el lenguaje indicado.`,
 Antes de responder, buscá en la base de conocimiento local y en la web.
 Citá fuentes cuando sea posible. Sé exhaustivo pero organizado.
 Usá encabezados Markdown para estructurar respuestas largas.`,
+    model: "",
+    harness: "",
+    createdAt: 0,
+    updatedAt: 0,
+  },
+  {
+    id: "default-chat-gemma",
+    name: "Charla",
+    icon: "💬",
+    content: `Sos un asistente conversacional natural y cálido, optimizado para charla general en español.
+Priorizá respuestas directas, claras y fluidas.
+En preguntas simples, respondé sin usar herramientas.
+Usá herramientas solo si el usuario pide explícitamente investigar, buscar datos actuales o verificar información.
+Mantené coherencia de contexto y evitá repeticiones innecesarias.`,
+    model: "gemma-4-31b-it-q4_k_m",
+    harness: "",
+    createdAt: 0,
+    updatedAt: 0,
+  },
+  {
+    id: "default-vision",
+    name: "Visión",
+    icon: "👁️",
+    content: `Sos un asistente experto en análisis visual y OCR con Gemma 4 Vision.
+Objetivo: extraer texto, tablas y detalles visuales finos de imágenes/documentos.
+Reglas:
+- Priorizá precisión literal en OCR (nombres, números, fechas, IDs, montos).
+- Si el texto es ambiguo o borroso, indicá fragmentos dudosos explícitamente.
+- Para documentos largos, devolvé salida estructurada: resumen + campos clave + texto extraído.
+- Evitá inventar datos no visibles en la imagen.
+- Cuando corresponda, proponé una segunda pasada enfocada en zonas críticas.`,
+    model: "gemma-4-31b-it-q4_k_m",
+    harness: "",
     createdAt: 0,
     updatedAt: 0,
   },
 ];
+
+function mergeDefaultBehaviors(existing?: Behavior[]): Behavior[] {
+  const current = existing ? [...existing] : [];
+  const normalized = current.map((b) => {
+    if (b.id === "default-chat-gemma") {
+      return {
+        ...b,
+        name: b.name?.trim() ? b.name : "Charla",
+        model: (b.model || "").trim() || "gemma-4-31b-it-q4_k_m",
+      };
+    }
+    if (b.id === "default-dev") {
+      return {
+        ...b,
+        harness: (b.harness || "").trim() || "claude-code",
+      };
+    }
+    return {
+      ...b,
+      harness: (b.harness || "").trim(),
+    };
+  });
+  const existingIds = new Set(normalized.map((b) => b.id));
+  const missingDefaults = DEFAULT_BEHAVIORS.filter((b) => !existingIds.has(b.id));
+  return [...normalized, ...missingDefaults];
+}
 
 // ─── Store types ──────────────────────────────────────────────────────────────
 
@@ -85,7 +148,7 @@ interface AppStore {
 
   // Behaviors
   behaviors: Behavior[];
-  createBehavior: (name: string, content: string, icon?: string) => string;
+  createBehavior: (name: string, content: string, icon?: string, model?: string, harness?: string) => string;
   updateBehavior: (id: string, updates: Partial<Omit<Behavior, "id" | "createdAt">>) => void;
   deleteBehavior: (id: string) => void;
 
@@ -220,13 +283,13 @@ export const useStore = create<AppStore>()(
       // ── Behaviors ────────────────────────────────────────────────────────────
       behaviors: DEFAULT_BEHAVIORS,
 
-      createBehavior: (name, content, icon) => {
+      createBehavior: (name, content, icon, model, harness) => {
         const id = uid();
         const now = Date.now();
         set((s) => ({
           behaviors: [
             ...s.behaviors,
-            { id, name, content, icon, createdAt: now, updatedAt: now },
+            { id, name, content, icon, model, harness, createdAt: now, updatedAt: now },
           ],
         }));
         return id;
@@ -296,6 +359,14 @@ export const useStore = create<AppStore>()(
         behaviors: s.behaviors,
         folders: s.folders,
       }),
+      merge: (persisted, current) => {
+        const p = (persisted as Partial<AppStore>) || {};
+        return {
+          ...current,
+          ...p,
+          behaviors: mergeDefaultBehaviors(p.behaviors ?? current.behaviors),
+        };
+      },
     }
   )
 );

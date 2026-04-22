@@ -12,6 +12,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import sys
 import tempfile
 import time
@@ -132,6 +133,10 @@ def _reload_config_runtime() -> None:
     Config.VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").lower()
     Config.LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").lower()
     Config.AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "en").lower()
+    Config.AGENT_HARNESS = os.getenv("AGENT_HARNESS", "native").lower()
+    Config.HARNESS_LITTLE_CODER_DIR = os.getenv("HARNESS_LITTLE_CODER_DIR", "")
+    Config.HARNESS_CLAUDE_CODE_BIN = os.getenv("HARNESS_CLAUDE_CODE_BIN", "")
+    Config.HARNESS_OPENCODE_BIN = os.getenv("HARNESS_OPENCODE_BIN", "")
     Config.MCP_PORT = int(os.getenv("MCP_PORT", "8000"))
     Config.AGENT_EXECUTION_MODE = os.getenv("AGENT_EXECUTION_MODE", "confirm").lower()
     Config.AGENT_COMMAND_TIMEOUT_SEC = int(os.getenv("AGENT_COMMAND_TIMEOUT_SEC", "60"))
@@ -239,6 +244,97 @@ def _find_first_gguf(root: Path) -> Optional[Path]:
         return g[0]
     except Exception:
         return None
+
+
+def _harness_install_root() -> Path:
+    return _runtime_root_dir() / "data" / ".unlz_internal" / "harnesses"
+
+
+def _harness_meta_path() -> Path:
+    return _harness_install_root() / "harnesses.json"
+
+
+def _ensure_harness_dirs() -> None:
+    _harness_install_root().mkdir(parents=True, exist_ok=True)
+
+
+def _read_harness_meta() -> dict:
+    p = _harness_meta_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_harness_meta(data: dict) -> None:
+    _ensure_harness_dirs()
+    _harness_meta_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _little_coder_install_dir() -> Path:
+    cfg_dir = (os.getenv("HARNESS_LITTLE_CODER_DIR") or getattr(Config, "HARNESS_LITTLE_CODER_DIR", "") or "").strip()
+    if cfg_dir:
+        return Path(cfg_dir)
+    return _harness_install_root() / "little-coder"
+
+
+def _little_coder_installed() -> bool:
+    d = _little_coder_install_dir()
+    return d.exists() and d.is_dir() and (d / "README.md").exists()
+
+
+def _claude_code_bin() -> str:
+    configured = (os.getenv("HARNESS_CLAUDE_CODE_BIN") or getattr(Config, "HARNESS_CLAUDE_CODE_BIN", "") or "").strip()
+    if configured and Path(configured).exists():
+        return configured
+    detected = shutil.which("claude")
+    return detected or ""
+
+
+def _claude_code_version(bin_path: str) -> str:
+    if not bin_path:
+        return ""
+    try:
+        proc = subprocess.run([bin_path, "--version"], capture_output=True, text=True, timeout=12)
+        if proc.returncode == 0:
+            txt = (proc.stdout or proc.stderr or "").strip()
+            if txt:
+                return txt.splitlines()[0][:120]
+    except Exception:
+        pass
+    return ""
+
+
+def _claude_code_installed() -> bool:
+    return bool(_claude_code_bin())
+
+
+def _opencode_bin() -> str:
+    configured = (os.getenv("HARNESS_OPENCODE_BIN") or getattr(Config, "HARNESS_OPENCODE_BIN", "") or "").strip()
+    if configured and Path(configured).exists():
+        return configured
+    detected = shutil.which("opencode")
+    return detected or ""
+
+
+def _opencode_version(bin_path: str) -> str:
+    if not bin_path:
+        return ""
+    try:
+        proc = subprocess.run([bin_path, "--version"], capture_output=True, text=True, timeout=12)
+        if proc.returncode == 0:
+            txt = (proc.stdout or proc.stderr or "").strip()
+            if txt:
+                return txt.splitlines()[0][:120]
+    except Exception:
+        pass
+    return ""
+
+
+def _opencode_installed() -> bool:
+    return bool(_opencode_bin())
 
 
 def _github_latest_llamacpp_release() -> dict:
@@ -827,6 +923,24 @@ def _build_model_chain(base_model: str, route: dict) -> list[str]:
     return chain or [base_model]
 
 
+def _route_with_model_override(route: dict, model_override: str) -> dict:
+    preferred = str(model_override or "").strip()
+    if not preferred:
+        return route
+    fallback = [str(x) for x in (route.get("fallback_models") or []) if str(x).strip()]
+    prev_primary = str(route.get("primary_model") or "").strip()
+    if prev_primary and prev_primary != preferred:
+        fallback = [prev_primary, *fallback]
+    dedup: list[str] = []
+    for m in fallback:
+        if m and m != preferred and m not in dedup:
+            dedup.append(m)
+    updated = dict(route or {})
+    updated["primary_model"] = preferred
+    updated["fallback_models"] = dedup
+    return updated
+
+
 def _router_metrics_path() -> Path:
     data_dir = Path(Config.DATA_DIR)
     internal_dir = data_dir / ".unlz_internal"
@@ -1029,6 +1143,8 @@ class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []        # [{role, content}, ...]
     system_prompt: str = ""         # override default system prompt (from Behavior)
+    model_override: str = ""        # optional behavior-level model override
+    harness_override: str = ""      # optional behavior-level harness override
     folder_id: str = ""             # optional folder scope for folder-only docs
     sandbox_root: str = ""          # optional folder sandbox path (enforced for command/file ops)
     mode: str = "normal"            # normal | plan | iterate | simple
@@ -1042,6 +1158,10 @@ class CommandActionRequest(BaseModel):
     sandbox_root: str = ""
     timeout_sec: int = Config.AGENT_COMMAND_TIMEOUT_SEC
     idempotency_key: str = ""
+
+
+class HarnessInstallRequest(BaseModel):
+    harness_id: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1909,13 +2029,45 @@ _PROMPTS = {
 }
 
 
+_HARNESS_PROMPTS = {
+    "native": "",
+    "claude-code": (
+        "Harness profile: claude-code. "
+        "Behave like a pragmatic coding agent: understand task, plan briefly, then execute concrete steps. "
+        "Prefer deterministic, testable changes and minimal diffs. "
+        "When coding, mention assumptions succinctly and prioritize correctness over verbosity. "
+        "Use tools only when they materially improve accuracy or execution."
+    ),
+    "opencode": (
+        "Harness profile: opencode. "
+        "Favor short iterative coding loops with quick verification and tool use when needed. "
+        "Keep responses practical and execution-oriented. "
+        "When solving coding tasks, prefer concrete patches and checks over long explanations."
+    ),
+    "little-coder": (
+        "Harness profile: little-coder. "
+        "Prefer short action loops and minimal context. "
+        "Before using tools, decide if they are strictly needed for the user goal. "
+        "When writing code: keep patches small, concrete, and executable. "
+        "State assumptions briefly, then produce directly usable output. "
+        "Avoid verbose chain-of-thought style narration."
+    ),
+}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Agent streaming generator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compose_system_prompt(system_prompt: str = "") -> str:
+def _compose_system_prompt(system_prompt: str = "", harness_override: str = "") -> str:
     lang = Config.AGENT_LANGUAGE
     base_prompt = _PROMPTS.get(lang, _PROMPTS["en"])
+    harness = (harness_override or getattr(Config, "AGENT_HARNESS", "native") or "native").strip().lower()
+    if harness not in _HARNESS_PROMPTS:
+        harness = "native"
+    harness_prompt = _HARNESS_PROMPTS.get(harness, _HARNESS_PROMPTS["native"])
+    if harness_prompt:
+        base_prompt = f"{base_prompt}\n\n{harness_prompt}"
     if system_prompt:
         return (
             f"{base_prompt}\n\n"
@@ -1976,6 +2128,8 @@ async def _agent_stream_normal(
     message: str,
     history: list[dict],
     system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
     folder_id: str = "",
     sandbox_root: str = "",
     conversation_id: str = "",
@@ -1995,9 +2149,22 @@ async def _agent_stream_normal(
         return
 
     client, model = _get_client()
-    task_area, route_conf, route_reason = _classify_task_area(message, mode="normal")
-    route = _resolve_task_route(task_area)
-    model_chain = _build_model_chain(model, route)
+    if simple_chat:
+        # Fast path: skip task router and model fallback chain.
+        task_area = "chat_general"
+        route_conf = 1.0
+        route_reason = "simple_mode"
+        route = {
+            "primary_model": model,
+            "fallback_models": [],
+            "profile": "simple",
+        }
+        model_chain = [model]
+    else:
+        task_area, route_conf, route_reason = _classify_task_area(message, mode="normal")
+        route = _resolve_task_route(task_area)
+        route = _route_with_model_override(route, model_override)
+        model_chain = _build_model_chain(model, route)
     limits = _agent_limits()
     started_at = time.time()
     tool_calls = 0
@@ -2009,27 +2176,29 @@ async def _agent_stream_normal(
     is_research = _is_research_request(message)
     llm_retries_total = 0
     model_used = model_chain[0]
-    yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
+    if not simple_chat:
+        yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
 
-    prompt_text = _compose_system_prompt(system_prompt)
+    prompt_text = _compose_system_prompt(system_prompt, harness_override)
     messages: list[dict] = [{"role": "system", "content": prompt_text}]
     for h in history[-12:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             messages.append({"role": h["role"], "content": h["content"]})
 
-    mem_lines = _retrieve_memory(message, conversation_id, _safe_folder_id(folder_id), top_k=5)
-    if mem_lines:
-        messages.append({
-            "role": "system",
-            "content": "Memoria relevante previa:\n" + "\n".join(f"- {m}" for m in mem_lines),
-        })
-    if is_research:
-        messages.append({
-            "role": "system",
-            "content": (
-                "Research mode: use web/local tools first, provide URLs, and mark confidence as low when evidence is insufficient."
-            ),
-        })
+    if not simple_chat:
+        mem_lines = _retrieve_memory(message, conversation_id, _safe_folder_id(folder_id), top_k=5)
+        if mem_lines:
+            messages.append({
+                "role": "system",
+                "content": "Memoria relevante previa:\n" + "\n".join(f"- {m}" for m in mem_lines),
+            })
+        if is_research:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "Research mode: use web/local tools first, provide URLs, and mark confidence as low when evidence is insufficient."
+                ),
+            })
     messages.append({"role": "user", "content": message})
 
     # Simple mode: answer directly with no tool-calling.
@@ -2313,6 +2482,8 @@ async def _run_internal_agent_once(
     message: str,
     history: list[dict],
     system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
     folder_id: str = "",
     sandbox_root: str = "",
     conversation_id: str = "",
@@ -2322,7 +2493,7 @@ async def _run_internal_agent_once(
     steps: list[dict] = []
     error_text = ""
     confidence = None
-    async for raw in _agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run):
+    async for raw in _agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run):
         if not raw.startswith("data: "):
             continue
         payload = raw[6:].strip()
@@ -2370,6 +2541,8 @@ async def _plan_stream(
     message: str,
     history: list[dict],
     system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
 ) -> AsyncGenerator[str, None]:
     from guardrails.validator import validate_input
     safety = validate_input(message)
@@ -2383,6 +2556,7 @@ async def _plan_stream(
     client, model = _get_client()
     task_area, route_conf, route_reason = _classify_task_area(message, mode="plan")
     route = _resolve_task_route(task_area)
+    route = _route_with_model_override(route, model_override)
     model_chain = _build_model_chain(model, route)
     model_used = model_chain[0]
     llm_retries_total = 0
@@ -2400,7 +2574,7 @@ async def _plan_stream(
         "   - Descartar\n"
         "No ejecutes herramientas en modo plan, solo planificación."
     )
-    final_system = f"{_compose_system_prompt(system_prompt)}\n\n{plan_protocol}"
+    final_system = f"{_compose_system_prompt(system_prompt, harness_override)}\n\n{plan_protocol}"
     messages: list[dict] = [{"role": "system", "content": final_system}]
     for h in history[-14:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
@@ -2439,6 +2613,8 @@ async def _iterate_stream(
     message: str,
     history: list[dict],
     system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
     folder_id: str = "",
     sandbox_root: str = "",
     conversation_id: str = "",
@@ -2457,11 +2633,12 @@ async def _iterate_stream(
     client, model = _get_client()
     task_area, route_conf, route_reason = _classify_task_area(message, mode="iterate")
     route = _resolve_task_route(task_area)
+    route = _route_with_model_override(route, model_override)
     model_chain = _build_model_chain(model, route)
     model_used = model_chain[0]
     llm_retries_total = 0
     yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
-    sys_prompt = _compose_system_prompt(system_prompt)
+    sys_prompt = _compose_system_prompt(system_prompt, harness_override)
     plan_req = (
         "Genera un plan de ejecucion en JSON puro con esta forma:\n"
         "{\"objective\":\"...\",\"stages\":[{\"name\":\"...\",\"goal\":\"...\",\"depends_on\":[],\"parallelizable\":false,\"checkpoint\":\"...\"}]}\n"
@@ -2534,7 +2711,7 @@ async def _iterate_stream(
                 f"Meta de etapa: {stage_goal}\\n"
                 f"Intento {attempt}/{max_retries}. Ejecuta las acciones necesarias usando herramientas y reporta resultado."
             )
-            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)
+            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)
             last_output = result.get("text") or result.get("error") or ""
             if result.get("error"):
                 logs.append(f"Intento {attempt}: error -> {result['error']}\n")
@@ -2641,6 +2818,8 @@ async def _agent_stream(
     message: str,
     history: list[dict],
     system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
     folder_id: str = "",
     sandbox_root: str = "",
     mode: str = "normal",
@@ -2684,18 +2863,18 @@ async def _agent_stream(
 
     m = (mode or "normal").strip().lower()
     if m == "plan":
-        async for ev in _stream_and_trace(_plan_stream(message, history, system_prompt)):
+        async for ev in _stream_and_trace(_plan_stream(message, history, system_prompt, model_override, harness_override)):
             yield ev
         return
     if m == "iterate":
-        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):
+        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)):
             yield ev
         return
     if m == "simple":
-        async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True)):
+        async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True)):
             yield ev
         return
-    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, folder_id, sandbox_root, conversation_id, dry_run)):
+    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)):
         yield ev
 
 
@@ -2766,6 +2945,8 @@ async def chat(req: ChatRequest):
             req.message,
             req.history,
             req.system_prompt,
+            req.model_override,
+            req.harness_override,
             req.folder_id,
             req.sandbox_root,
             req.mode,
@@ -2920,6 +3101,270 @@ async def get_settings():
 async def save_settings(payload: dict):
     _upsert_env_settings(payload)
     return {"success": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Harness management (native / little-coder / future harnesses)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/harnesses/status")
+async def harnesses_status():
+    _reload_config_runtime()
+    _ensure_harness_dirs()
+    meta = _read_harness_meta()
+    claude_bin = _claude_code_bin()
+    claude_installed = _claude_code_installed()
+    claude_meta = (meta.get("claude-code") or {}) if isinstance(meta, dict) else {}
+    claude_version = _claude_code_version(claude_bin) or str(claude_meta.get("version") or "")
+    opencode_bin = _opencode_bin()
+    opencode_installed = _opencode_installed()
+    opencode_meta = (meta.get("opencode") or {}) if isinstance(meta, dict) else {}
+    opencode_version = _opencode_version(opencode_bin) or str(opencode_meta.get("version") or "")
+    little_dir = _little_coder_install_dir()
+    little_installed = _little_coder_installed()
+    little_meta = (meta.get("little-coder") or {}) if isinstance(meta, dict) else {}
+    options = [
+        {
+            "id": "native",
+            "label": "UNLZ-AGENT nativo",
+            "installed": True,
+            "version": "builtin",
+            "path": "",
+        },
+        {
+            "id": "claude-code",
+            "label": "claude-code",
+            "installed": claude_installed,
+            "version": claude_version,
+            "path": claude_bin,
+        },
+        {
+            "id": "opencode",
+            "label": "opencode",
+            "installed": opencode_installed,
+            "version": opencode_version,
+            "path": opencode_bin,
+        },
+        {
+            "id": "little-coder",
+            "label": "little-coder",
+            "installed": little_installed,
+            "version": str(little_meta.get("version") or ""),
+            "path": str(little_dir),
+        },
+    ]
+    return {
+        "active": (getattr(Config, "AGENT_HARNESS", "native") or "native").strip().lower(),
+        "options": options,
+    }
+
+
+@app.post("/harnesses/install")
+async def harnesses_install(req: HarnessInstallRequest):
+    _reload_config_runtime()
+    _ensure_harness_dirs()
+    harness_id = (req.harness_id or "").strip().lower()
+    if harness_id == "claude-code":
+        install_errors: list[str] = []
+
+        # 1) Preferred on Windows: winget
+        try:
+            if os.name == "nt" and shutil.which("winget"):
+                proc = subprocess.run(
+                    [
+                        "winget", "install", "-e", "--id", "Anthropic.ClaudeCode",
+                        "--accept-source-agreements", "--accept-package-agreements",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=360,
+                )
+                if proc.returncode != 0:
+                    install_errors.append(f"winget: {(proc.stderr or proc.stdout or '').strip()[:400]}")
+        except Exception as e:
+            install_errors.append(f"winget exception: {e}")
+
+        claude_bin = _claude_code_bin()
+
+        # 2) Official script fallback
+        if not claude_bin and os.name == "nt":
+            try:
+                ps_cmd = "irm https://claude.ai/install.ps1 | iex"
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=420,
+                )
+                if proc.returncode != 0:
+                    install_errors.append(f"install.ps1: {(proc.stderr or proc.stdout or '').strip()[:400]}")
+            except Exception as e:
+                install_errors.append(f"install.ps1 exception: {e}")
+            claude_bin = _claude_code_bin()
+
+        # 3) NPM legacy fallback
+        if not claude_bin and shutil.which("npm"):
+            try:
+                proc = subprocess.run(
+                    ["npm", "install", "-g", "@anthropic-ai/claude-code"],
+                    capture_output=True,
+                    text=True,
+                    timeout=420,
+                )
+                if proc.returncode != 0:
+                    install_errors.append(f"npm: {(proc.stderr or proc.stdout or '').strip()[:400]}")
+            except Exception as e:
+                install_errors.append(f"npm exception: {e}")
+            claude_bin = _claude_code_bin()
+
+        if not claude_bin:
+            detail = " | ".join([x for x in install_errors if x]) or "Unknown installation failure"
+            raise HTTPException(500, f"No se pudo instalar claude-code: {detail}")
+
+        version = _claude_code_version(claude_bin)
+        meta = _read_harness_meta()
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["claude-code"] = {
+            "version": version,
+            "source": "official",
+            "installed_at": datetime.now().isoformat(timespec="seconds"),
+            "path": claude_bin,
+        }
+        _write_harness_meta(meta)
+        _upsert_env_settings({
+            "HARNESS_CLAUDE_CODE_BIN": claude_bin,
+        })
+        _reload_config_runtime()
+        return {
+            "status": "installed",
+            "harness_id": "claude-code",
+            "path": claude_bin,
+            "version": version,
+        }
+
+    if harness_id == "opencode":
+        install_errors: list[str] = []
+
+        # 1) Try official install command via PowerShell (best-effort on Windows)
+        if os.name == "nt":
+            try:
+                ps_cmd = "irm https://opencode.ai/install | iex"
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=420,
+                )
+                if proc.returncode != 0:
+                    install_errors.append(f"install script: {(proc.stderr or proc.stdout or '').strip()[:400]}")
+            except Exception as e:
+                install_errors.append(f"install script exception: {e}")
+
+        op_bin = _opencode_bin()
+
+        # 2) npm fallback(s)
+        if not op_bin and shutil.which("npm"):
+            for pkg in ("opencode-ai", "@opencode-ai/cli", "@opencode/cli"):
+                try:
+                    proc = subprocess.run(
+                        ["npm", "install", "-g", pkg],
+                        capture_output=True,
+                        text=True,
+                        timeout=420,
+                    )
+                    if proc.returncode != 0:
+                        install_errors.append(f"npm {pkg}: {(proc.stderr or proc.stdout or '').strip()[:240]}")
+                except Exception as e:
+                    install_errors.append(f"npm {pkg} exception: {e}")
+                op_bin = _opencode_bin()
+                if op_bin:
+                    break
+
+        if not op_bin:
+            detail = " | ".join([x for x in install_errors if x]) or "Unknown installation failure"
+            raise HTTPException(500, f"No se pudo instalar opencode: {detail}")
+
+        version = _opencode_version(op_bin)
+        meta = _read_harness_meta()
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["opencode"] = {
+            "version": version,
+            "source": "official",
+            "installed_at": datetime.now().isoformat(timespec="seconds"),
+            "path": op_bin,
+        }
+        _write_harness_meta(meta)
+        _upsert_env_settings({
+            "HARNESS_OPENCODE_BIN": op_bin,
+        })
+        _reload_config_runtime()
+        return {
+            "status": "installed",
+            "harness_id": "opencode",
+            "path": op_bin,
+            "version": version,
+        }
+
+    if harness_id != "little-coder":
+        raise HTTPException(400, f"Unsupported harness: {harness_id}")
+
+    target_dir = _little_coder_install_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download latest main snapshot from GitHub.
+    zip_url = "https://codeload.github.com/itayinbarr/little-coder/zip/refs/heads/main"
+    with tempfile.TemporaryDirectory(prefix="unlz-harness-") as tmp:
+        tmp_path = Path(tmp)
+        zip_path = tmp_path / "little-coder-main.zip"
+        req_dl = Request(zip_url, headers={"User-Agent": "unlz-agent"})
+        try:
+            with urlopen(req_dl, timeout=180) as resp:
+                zip_path.write_bytes(resp.read())
+        except Exception as e:
+            raise HTTPException(502, f"Download failed: {e}")
+
+        extract_root = tmp_path / "extract"
+        extract_root.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_root)
+        except Exception as e:
+            raise HTTPException(500, f"Extraction failed: {e}")
+
+        candidates = [p for p in extract_root.iterdir() if p.is_dir()]
+        if not candidates:
+            raise HTTPException(500, "Invalid little-coder archive layout")
+        src_dir = candidates[0]
+
+        if target_dir.exists():
+            shutil.rmtree(target_dir, ignore_errors=True)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src_dir, target_dir)
+
+    meta = _read_harness_meta()
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["little-coder"] = {
+        "version": f"main-{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "source": "https://github.com/itayinbarr/little-coder",
+        "installed_at": datetime.now().isoformat(timespec="seconds"),
+        "path": str(target_dir),
+    }
+    _write_harness_meta(meta)
+
+    _upsert_env_settings({
+        "HARNESS_LITTLE_CODER_DIR": str(target_dir),
+    })
+    _reload_config_runtime()
+
+    return {
+        "status": "installed",
+        "harness_id": "little-coder",
+        "path": str(target_dir),
+        "version": str(meta["little-coder"].get("version") or ""),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3460,6 +3905,7 @@ if __name__ == "__main__":
     print(f"UNLZ Agent Server v2 — port {port}")
     print(f"Provider : {Config.LLM_PROVIDER}")
     print(f"Language : {Config.AGENT_LANGUAGE}")
+    print(f"Harness  : {getattr(Config, 'AGENT_HARNESS', 'native')}")
     print(f"llama.cpp dir : {_llamacpp_install_root()}")
     if Config.LLM_PROVIDER == "llamacpp":
         print(f"Model    : {Config.LLAMACPP_MODEL_ALIAS} @ {Config.LLAMACPP_MODEL_PATH}")

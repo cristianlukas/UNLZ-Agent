@@ -11,12 +11,14 @@ function BehaviorEditor({
   onCancel,
 }: {
   behavior: Partial<Behavior>;
-  onSave: (name: string, content: string, icon: string) => void;
+  onSave: (name: string, content: string, icon: string, model: string, harness: string) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(behavior.name ?? "");
   const [icon, setIcon] = useState(behavior.icon ?? "🤖");
   const [content, setContent] = useState(behavior.content ?? "");
+  const [model, setModel] = useState(behavior.model ?? "");
+  const [harness, setHarness] = useState(behavior.harness ?? "");
 
   const EMOJI_PRESETS = ["🤖", "🎓", "💻", "🔬", "📝", "🌐", "🎨", "⚙️", "📊", "🧠"];
 
@@ -82,6 +84,41 @@ function BehaviorEditor({
         </p>
       </div>
 
+      <div>
+        <label className="block text-xs font-medium text-muted mb-1.5">
+          Modelo (opcional)
+        </label>
+        <input
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          placeholder="ej: gemma-4-31b-it-q4_k_m"
+          className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+        />
+        <p className="text-[10px] text-muted mt-1">
+          Si se completa, este comportamiento intenta usar ese modelo primero.
+        </p>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-muted mb-1.5">
+          Harness (opcional)
+        </label>
+        <select
+          value={harness}
+          onChange={(e) => setHarness(e.target.value)}
+          className="w-full bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary outline-none focus:border-accent/50 transition-colors"
+        >
+          <option value="">Usar harness global</option>
+          <option value="native">UNLZ-AGENT nativo</option>
+          <option value="claude-code">claude-code</option>
+          <option value="opencode">opencode</option>
+          <option value="little-coder">little-coder</option>
+        </select>
+        <p className="text-[10px] text-muted mt-1">
+          Si se define, este comportamiento fuerza ese harness para la conversación.
+        </p>
+      </div>
+
       {/* Actions */}
       <div className="flex items-center justify-end gap-2">
         <button
@@ -92,7 +129,7 @@ function BehaviorEditor({
           Cancelar
         </button>
         <button
-          onClick={() => name.trim() && content.trim() && onSave(name.trim(), content, icon)}
+          onClick={() => name.trim() && content.trim() && onSave(name.trim(), content, icon, model.trim(), harness.trim())}
           disabled={!name.trim() || !content.trim()}
           className="btn-primary flex items-center gap-1.5 px-4 py-1.5 text-sm disabled:opacity-40"
         >
@@ -156,6 +193,16 @@ function BehaviorCard({
       <p className="text-xs text-secondary leading-relaxed line-clamp-3 font-mono bg-base rounded-lg px-3 py-2 border border-border">
         {behavior.content}
       </p>
+      {behavior.model?.trim() && (
+        <p className="text-[10px] text-muted font-mono">
+          Modelo: {behavior.model}
+        </p>
+      )}
+      {behavior.harness?.trim() && (
+        <p className="text-[10px] text-muted font-mono">
+          Harness: {behavior.harness}
+        </p>
+      )}
 
       <button
         onClick={onUse}
@@ -180,13 +227,13 @@ export default function BehaviorsView() {
     useStore();
   const [editor, setEditor] = useState<EditorState>(null);
 
-  function handleSaveNew(name: string, content: string, icon: string) {
-    createBehavior(name, content, icon);
+  function handleSaveNew(name: string, content: string, icon: string, model: string, harness: string) {
+    createBehavior(name, content, icon, model, harness);
     setEditor(null);
   }
 
-  function handleSaveEdit(id: string, name: string, content: string, icon: string) {
-    updateBehavior(id, { name, content, icon });
+  function handleSaveEdit(id: string, name: string, content: string, icon: string, model: string, harness: string) {
+    updateBehavior(id, { name, content, icon, model, harness });
     setEditor(null);
   }
 
@@ -232,8 +279,8 @@ export default function BehaviorsView() {
             ) : (
               <BehaviorEditor
                 behavior={editor.behavior}
-                onSave={(name, content, icon) =>
-                  handleSaveEdit(editor.behavior.id, name, content, icon)
+                onSave={(name, content, icon, model, harness) =>
+                  handleSaveEdit(editor.behavior.id, name, content, icon, model, harness)
                 }
                 onCancel={() => setEditor(null)}
               />
