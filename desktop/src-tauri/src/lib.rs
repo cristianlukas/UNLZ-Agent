@@ -119,9 +119,12 @@ fn do_spawn(_root: &PathBuf, _python: &str) -> Option<Child> {
 
     let candidates: Vec<PathBuf> = if cfg!(windows) {
         vec![
+            exe_dir.join("binaries").join("agent_server.exe"),
             exe_dir.join("agent_server.exe"),
             exe_dir.join("resources").join("agent_server.exe"),
+            exe_dir.join("resources").join("binaries").join("agent_server.exe"),
             exe_dir.join("..").join("Resources").join("agent_server.exe"),
+            exe_dir.join("..").join("binaries").join("agent_server.exe"),
         ]
     } else {
         vec![
@@ -175,11 +178,11 @@ fn refresh_windows_shortcut_and_icon_cache() {
     let icon_str = icon_path.to_string_lossy().replace('\'', "''");
     let ps = format!(
         r#"$ErrorActionPreference='SilentlyContinue';
-$targets = @();
-$targets += Get-ChildItem (Join-Path $env:USERPROFILE 'Desktop') -Filter '*UNLZ*Agent*.lnk' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName;
-$targets += Get-ChildItem (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') -Filter '*UNLZ*Agent*.lnk' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName;
-$targets += 'C:\Users\Public\Desktop\UNLZ Agent.lnk';
-$targets = $targets | Select-Object -Unique;
+$targets = @(
+  (Join-Path $env:USERPROFILE 'Desktop\UNLZ Agent.lnk'),
+  (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\UNLZ Agent.lnk'),
+  'C:\Users\Public\Desktop\UNLZ Agent.lnk'
+) | Select-Object -Unique;
 $ws = New-Object -ComObject WScript.Shell;
 foreach($p in $targets) {{
   if(Test-Path $p) {{

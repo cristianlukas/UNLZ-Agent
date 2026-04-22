@@ -28,7 +28,7 @@ class Config:
     WEB_SEARCH_ENGINE = os.getenv("WEB_SEARCH_ENGINE", "google").lower()    # google | duckduckgo | serpapi | bing | fusion | auto
 
     # Paths
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = str(_runtime_root_dir())
     RAG_STORAGE_PATH = os.path.join(BASE_DIR, "rag_storage")
     DATA_DIR = os.path.join(BASE_DIR, "data")
 

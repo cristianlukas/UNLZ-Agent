@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
 import time
@@ -22,18 +23,50 @@ from urllib.request import Request, urlopen
 
 # ── Redirect stdout/stderr to log when not running in a real terminal ─────────
 # Covers: Tauri subprocess (CREATE_NO_WINDOW), background launch, etc.
-# os.isatty(1) checks the actual fd, not the Python wrapper.
-_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_server.log")
-_FORCE_LOG_FILE = os.getenv("UNLZ_FORCE_LOG_FILE", "0").strip().lower() in ("1", "true", "yes")
-try:
-    _is_tty = os.isatty(sys.stdout.fileno())
-except (AttributeError, OSError):
-    _is_tty = False
+# In PyInstaller one-file mode, __file__ may resolve to a transient extraction
+# directory. Use runtime/install root first and gracefully fallback.
+def _bootstrap_runtime_root() -> str:
+    override = (os.getenv("UNLZ_PROJECT_ROOT") or "").strip()
+    if override:
+        return override
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        if exe_dir.name.lower() == "binaries":
+            return str(exe_dir.parent)
+        return str(exe_dir)
+    return os.path.dirname(os.path.abspath(__file__))
 
-if _FORCE_LOG_FILE or not _is_tty:
-    _log_fh = open(_LOG_PATH, "a", encoding="utf-8", buffering=1)
-    sys.stdout = _log_fh
-    sys.stderr = _log_fh
+
+def _bootstrap_log_path() -> str:
+    root = _bootstrap_runtime_root()
+    return os.path.join(root, "agent_server.log")
+
+
+def _install_stdio_file_log() -> None:
+    force_log = os.getenv("UNLZ_FORCE_LOG_FILE", "0").strip().lower() in ("1", "true", "yes")
+    try:
+        is_tty = os.isatty(sys.stdout.fileno())
+    except (AttributeError, OSError):
+        is_tty = False
+    if not (force_log or not is_tty):
+        return
+
+    candidates = [
+        _bootstrap_log_path(),
+        os.path.join(tempfile.gettempdir(), "unlz-agent", "agent_server.log"),
+    ]
+    for path in candidates:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            log_fh = open(path, "a", encoding="utf-8", buffering=1)
+            sys.stdout = log_fh
+            sys.stderr = log_fh
+            return
+        except Exception:
+            continue
+
+
+_install_stdio_file_log()
 import subprocess
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -2801,6 +2834,45 @@ async def save_settings(payload: dict):
 _llamacpp_proc: Optional[subprocess.Popen] = None
 
 
+def _pids_listening_on_tcp_port(port: int) -> set[int]:
+    pids: set[int] = set()
+    try:
+        out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True, encoding="utf-8", errors="ignore")
+    except Exception:
+        return pids
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r"^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$", line, flags=re.IGNORECASE)
+        if not m:
+            continue
+        local_port = int(m.group(1))
+        pid = int(m.group(2))
+        if local_port == int(port) and pid > 0:
+            pids.add(pid)
+    return pids
+
+
+def _kill_pid_tree(pid: int) -> bool:
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        if os.name == "nt":
+            # /T kills child processes too. We don't fail hard on non-zero exit.
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return True
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
 def _build_llamacpp_args() -> list[str]:
     args = [
         Config.LLAMACPP_EXECUTABLE,
@@ -2855,16 +2927,51 @@ async def llamacpp_start():
 @app.post("/llamacpp/stop")
 async def llamacpp_stop():
     global _llamacpp_proc
-    if _llamacpp_proc is None or _llamacpp_proc.poll() is not None:
+    _reload_config_runtime()
+    killed_pids: list[int] = []
+    managed_pid: Optional[int] = None
+
+    # 1) Stop managed process (if any)
+    if _llamacpp_proc is not None and _llamacpp_proc.poll() is None:
+        managed_pid = _llamacpp_proc.pid
+        try:
+            _llamacpp_proc.terminate()
+            _llamacpp_proc.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            try:
+                _llamacpp_proc.kill()
+                _llamacpp_proc.wait(timeout=2)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            if managed_pid:
+                killed_pids.append(managed_pid)
+            _llamacpp_proc = None
+    else:
         _llamacpp_proc = None
-        return {"status": "not_running"}
-    _llamacpp_proc.terminate()
-    try:
-        _llamacpp_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _llamacpp_proc.kill()
-    _llamacpp_proc = None
-    return {"status": "stopped"}
+
+    # 2) Also kill any process still listening on the configured llama.cpp port.
+    # This covers orphan/external llama-server instances that still hold VRAM.
+    port_pids = _pids_listening_on_tcp_port(Config.LLAMACPP_PORT)
+    for pid in sorted(port_pids):
+        if _kill_pid_tree(pid):
+            killed_pids.append(pid)
+
+    # 3) Wait a bit for socket/process teardown.
+    running = False
+    for _ in range(12):
+        running = _http_reachable(f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}/health", timeout=0.5)
+        if not running:
+            break
+        time.sleep(0.25)
+
+    if not killed_pids and not running:
+        return {"status": "not_running", "running": False, "killed_pids": []}
+    if running:
+        return {"status": "still_running", "running": True, "killed_pids": sorted(set(killed_pids))}
+    return {"status": "stopped", "running": False, "killed_pids": sorted(set(killed_pids))}
 
 
 @app.get("/llamacpp/status")

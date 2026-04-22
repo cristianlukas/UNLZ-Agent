@@ -12,6 +12,7 @@ import unlzLogo from "../assets/unlz-logo.png";
 let _msgId = Date.now();
 const uid = () => String(++_msgId);
 type SendMode = "normal" | "plan" | "iterate";
+type StreamPhase = "sending" | "routing" | "tools" | "generating";
 
 // ─── Tool step ────────────────────────────────────────────────────────────────
 
@@ -505,13 +506,31 @@ function ActiveChat({ convId }: { convId: string }) {
   const [commandBusyByMsgId, setCommandBusyByMsgId] = useState<Record<string, boolean>>({});
   const [autonomousExec, setAutonomousExec] = useState(false);
   const [execModeBusy, setExecModeBusy] = useState(false);
+  const [streamPhase, setStreamPhase] = useState<StreamPhase>("sending");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const initializedConvRef = useRef<string | null>(null);
+  const streamInFlightRef = useRef(false);
 
   const messages = conv?.messages ?? [];
+  const uiLocked = !agentReady || !llmReady || isStreaming;
+  const lockMessage = !agentReady
+    ? "Iniciando agente…"
+    : !llmReady
+      ? "Cargando modelo…"
+      : isStreaming
+        ? (
+            streamPhase === "routing"
+              ? "Planificando respuesta…"
+              : streamPhase === "tools"
+                ? "Ejecutando herramientas…"
+                : streamPhase === "generating"
+                  ? "Generando respuesta…"
+                  : "Enviando consulta…"
+          )
+        : "";
 
   function buildSystemPrompt(): string {
     const chunks: string[] = [];
@@ -587,6 +606,9 @@ function ActiveChat({ convId }: { convId: string }) {
     historyForModel: Array<{ role: string; content: string }>,
     mode: SendMode = "normal"
   ) {
+    if (streamInFlightRef.current) return;
+    streamInFlightRef.current = true;
+
     const assistantId = uid();
     const assistantMsg: ChatMessage = {
       id: assistantId,
@@ -597,6 +619,7 @@ function ActiveChat({ convId }: { convId: string }) {
     };
 
     upsertMessage(convId, assistantMsg);
+    setStreamPhase("sending");
     setIsStreaming(true);
     setTimeout(() => scrollToBottom(false), 0);
 
@@ -612,6 +635,7 @@ function ActiveChat({ convId }: { convId: string }) {
         false
       )) {
         if (event.type === "run") {
+          setStreamPhase("routing");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -621,6 +645,7 @@ function ActiveChat({ convId }: { convId: string }) {
             runId: event.run_id,
           });
         } else if (event.type === "step") {
+          setStreamPhase("tools");
           upsertMessage(convId, {
             ...assistantMsg,
             steps: [
@@ -630,6 +655,7 @@ function ActiveChat({ convId }: { convId: string }) {
             ],
           });
         } else if (event.type === "chunk") {
+          setStreamPhase("generating");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -672,9 +698,11 @@ function ActiveChat({ convId }: { convId: string }) {
         content: `Error de conexión: ${e}`,
         error: true,
       });
+    } finally {
+      setIsStreaming(false);
+      setStreamPhase("sending");
+      streamInFlightRef.current = false;
     }
-
-    setIsStreaming(false);
   }
 
   function markCommandDecision(msgId: string, decision: "approved" | "rejected" | "suggest_edit") {
@@ -798,7 +826,7 @@ function ActiveChat({ convId }: { convId: string }) {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || streamInFlightRef.current) return;
 
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -913,6 +941,7 @@ function ActiveChat({ convId }: { convId: string }) {
           <select
             value={conv?.folderId ?? ""}
             onChange={(e) => setConversationFolder(convId, e.target.value || undefined)}
+            disabled={uiLocked}
             className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-secondary"
             title="Carpeta de la conversación"
           >
@@ -928,6 +957,7 @@ function ActiveChat({ convId }: { convId: string }) {
             <button
               className="btn-ghost text-xs px-2.5 py-1 flex items-center gap-1.5"
               onClick={() => clearConversation(convId)}
+              disabled={uiLocked}
             >
               <RefreshCw size={11} />
               Limpiar
@@ -1007,11 +1037,11 @@ function ActiveChat({ convId }: { convId: string }) {
                 </div>
               </div>
             ) : (
-              <Message
+            <Message
                 key={msg.id}
                 msg={msg}
                 isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
-                canEdit={!isStreaming}
+                canEdit={!uiLocked}
                 onEdit={() => startEdit(msg)}
                 onApproveCommand={handleApproveCommand}
                 onRejectCommand={handleRejectCommand}
@@ -1035,15 +1065,21 @@ function ActiveChat({ convId }: { convId: string }) {
 
       {/* Input */}
       <div className="px-4 pb-4 pt-2 shrink-0">
+        {uiLocked && (
+          <div className="mb-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs text-accent">
+            {lockMessage}
+          </div>
+        )}
         <div className="flex items-center gap-2 mb-2">
           <button
             onClick={() => setPlanArmed((p) => !p)}
             aria-pressed={planArmed}
+            disabled={uiLocked}
             className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
               planArmed
                 ? "border-accent/50 text-accent bg-accent/15"
                 : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            }`}
+            } disabled:opacity-40`}
             title="Afecta solo al primer envío de esta conversación"
           >
             Modo Plan
@@ -1051,11 +1087,12 @@ function ActiveChat({ convId }: { convId: string }) {
           <button
             onClick={() => setIteratorMode((p) => !p)}
             aria-pressed={iteratorMode}
+            disabled={uiLocked}
             className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
               iteratorMode
                 ? "border-accent/50 text-accent bg-accent/15"
                 : "border-border text-muted hover:text-primary hover:bg-surface-2"
-            }`}
+            } disabled:opacity-40`}
             title="Modo agente iterador"
           >
             Iterador
@@ -1063,7 +1100,7 @@ function ActiveChat({ convId }: { convId: string }) {
           <button
             onClick={handleToggleExecutionMode}
             aria-pressed={autonomousExec}
-            disabled={execModeBusy}
+            disabled={execModeBusy || uiLocked}
             className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
               autonomousExec
                 ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/15"
@@ -1119,7 +1156,8 @@ function ActiveChat({ convId }: { convId: string }) {
             placeholder={
               !agentReady ? "Esperando al agente…" :
               !llmReady  ? "Cargando modelo LLM… (puede tardar 1-2 min)" :
-                           "Escribí tu consulta… (Enter para enviar)"
+              isStreaming ? lockMessage :
+                            "Escribí tu consulta… (Enter para enviar)"
             }
             disabled={!agentReady || !llmReady || isStreaming}
             className="flex-1 bg-transparent text-sm text-primary placeholder-muted outline-none resize-none leading-relaxed py-1 px-1 selectable disabled:opacity-40"
@@ -1138,7 +1176,7 @@ function ActiveChat({ convId }: { convId: string }) {
           </button>
         </div>
         <p className="text-[10px] text-muted mt-1.5 text-center">
-          Shift+Enter para nueva línea · las respuestas pueden incluir pasos de herramientas
+          {uiLocked ? lockMessage : "Shift+Enter para nueva línea · las respuestas pueden incluir pasos de herramientas"}
         </p>
       </div>
     </div>
