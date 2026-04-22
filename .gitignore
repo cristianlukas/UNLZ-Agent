@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -72,10 +72,13 @@ data/memory.jsonl
 data/runs/
 data/snapshots/
 data/folders/
+data/.unlz_internal/
 
 # Keep only source assets under desktop/src/assets
 desktop/src/assets/*.tmp
 desktop/src/assets/*.bak
+!desktop/src/lib/
+!desktop/src/lib/**
 dist-single-exe/UNLZ-Agent-Setup.exe
 desktop/src-tauri/binaries/agent_server.exe
 .claude/worktrees/gracious-einstein-90c379/
