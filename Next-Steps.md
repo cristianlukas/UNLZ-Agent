@@ -23,7 +23,7 @@ This roadmap focuses on making **UNLZ Agent** structurally stronger as an agent 
 - [x] Add post-action verification primitives (file exists/content changed/command output checks).
 - [x] Add automatic fallback strategies when a tool fails (alternative command/query/provider).
 - [x] Add confidence scoring per answer and per action.
-- [x] Add “unverified claim” detector in research mode and force citations when confidence is low.
+- [x] Add "unverified claim" detector in research mode and force citations when confidence is low.
 
 ## Phase 4: MCP and Integrations
 
@@ -37,13 +37,13 @@ This roadmap focuses on making **UNLZ Agent** structurally stronger as an agent 
 - [x] Add long-horizon memory store with decay + retrieval strategy (recent, semantic, task-linked).
 - [x] Add folder-scoped memory and conversation-scoped memory separation.
 - [x] Add automatic context compression (summaries + critical facts pinning).
-- [x] Add “state snapshots” for resumable multi-session agent tasks.
+- [x] Add "state snapshots" for resumable multi-session agent tasks.
 
 ## Phase 6: Competitive DX (Codex/Claude-class workflow)
 
-- [x] Add first-class “Plan Review” UI: alternatives, tradeoffs, chosen path, explicit approval gate.
-- [x] Add “Execution Console” timeline with live step status and replay.
-- [x] Add one-click “retry from this step” and “branch from here” controls.
+- [x] Add first-class "Plan Review" UI: alternatives, tradeoffs, chosen path, explicit approval gate.
+- [x] Add "Execution Console" timeline with live step status and replay.
+- [x] Add one-click "retry from this step" and "branch from here" controls.
 - [x] Add benchmark suite: task success rate, time-to-completion, correction count, token/tool efficiency.
 
 ## Phase 7: Production Readiness
@@ -53,3 +53,23 @@ This roadmap focuses on making **UNLZ Agent** structurally stronger as an agent 
 - [x] Add structured telemetry (opt-in) for agent quality metrics.
 - [x] Publish architecture decision records (ADR) for key agent/MCP design choices.
 
+## Phase 8: Model Management and Developer Experience
+
+- [x] Add hardware-aware model catalog with tier classification (entry/mid/high/ultra).
+- [x] Add 1-click GGUF model downloads from HuggingFace with SSE progress and apply flow.
+- [x] Add automatic model update detection (same-family and cross-family upgrades).
+- [x] Add skip/snooze controls for update notifications, persisted across sessions.
+- [x] Add harness system: execution mode profiles (native/claude-code/little-coder/opencode).
+- [x] Add per-behavior llama.cpp runtime overrides with global fallback (behavior values override `LLAMACPP_*` only while active).
+- [x] Add `simple` chat mode bypassing task router for fast direct-LLM responses.
+- [x] Fix LLM fallback for models without tool-calling support (auto-retry without tools, remove `tool_choice="required"`).
+- [x] Add Dev Mode: live server log tail + run trace browser gated behind settings toggle.
+
+## Phase 9: Upcoming
+
+- [ ] Model fine-tuning or LoRA adapter support for domain-specific tasks.
+- [ ] Multi-modal input (image/document) in chat via llama.cpp multimodal builds.
+- [ ] Scheduled/recurring agent tasks (cron-style).
+- [ ] Remote agent mode: expose agent API over LAN/internet with auth.
+- [ ] Plugin system for custom tools without backend code changes.
+- [ ] Mobile companion app (Tauri mobile or PWA).

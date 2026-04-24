@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Save, Settings, RotateCcw, RefreshCw, FolderOpen, FileSearch, Download, Plus, Trash2, Search } from "lucide-react";
+import { Save, Settings, RotateCcw, RefreshCw, FolderOpen, FileSearch, Download, Plus, Trash2, Search, Terminal } from "lucide-react";
+import { useStore } from "../lib/store";
 import {
   getSettings,
   saveSettings,
@@ -62,6 +63,59 @@ const EMPTY_ROUTER: TaskRouterConfig = {
   version: 1,
   areas: {},
 };
+
+const PERITOSOFT_AREA_NAMES = new Set([
+  "notificaciones",
+  "resumen_asignacion",
+  "metadata",
+  "jurisdiccion",
+  "docgen_informe",
+]);
+
+const PERITOSOFT_KEYWORD_HINTS = [
+  "juzgado",
+  "expediente",
+  "cedula",
+  "cédula",
+  "traslado",
+  "proveido",
+  "proveído",
+  "jurisdiccion",
+  "jurisdicción",
+  "fuero",
+  "camara",
+  "cámara",
+  "procesal",
+  "perito",
+  "pericial",
+  "asignacion",
+  "asignación",
+];
+
+function isPeritoSoftRouterArea(
+  area: string,
+  cfg?: {
+    profile?: string;
+    keywords?: string[];
+  }
+): boolean {
+  const a = String(area || "").trim().toLowerCase();
+  if (PERITOSOFT_AREA_NAMES.has(a)) return true;
+  const profile = String(cfg?.profile || "").toLowerCase();
+  const keywords = (cfg?.keywords || []).map((k) => String(k).toLowerCase());
+  const haystack = [a, profile, ...keywords].join(" ");
+  return PERITOSOFT_KEYWORD_HINTS.some((k) => haystack.includes(k));
+}
+
+function sanitizeRouterConfig(input: TaskRouterConfig): TaskRouterConfig {
+  const areas = Object.fromEntries(
+    Object.entries(input.areas || {}).filter(([area, cfg]) => !isPeritoSoftRouterArea(area, cfg))
+  );
+  return {
+    version: Number(input.version || 1),
+    areas,
+  };
+}
 
 const ROUTER_METRICS_PREFS_KEY = "unlz.router.metrics.prefs.v1";
 
@@ -174,6 +228,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function SettingsView() {
+  const { devMode, setDevMode, setView } = useStore();
   const [config, setConfig] = useState<Config>({ ...DEFAULTS });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState("");
@@ -203,7 +258,7 @@ export default function SettingsView() {
 
   useEffect(() => {
     getTaskRouterConfig()
-      .then((cfg) => setRouterConfig(cfg))
+      .then((cfg) => setRouterConfig(sanitizeRouterConfig(cfg)))
       .catch(() => { /* backend offline */ });
     getTaskRouterMetrics()
       .then((m) => setRouterMetrics(m))
@@ -386,6 +441,10 @@ export default function SettingsView() {
       showToast("Esa área ya existe");
       return;
     }
+    if (isPeritoSoftRouterArea(area, { profile: "", keywords: [] })) {
+      showToast("Esa área es específica de PeritoSoft y no corresponde en UNLZ-Agent.");
+      return;
+    }
     updateRouterArea(area, {
       primary_model: "",
       fallback_models: [],
@@ -416,7 +475,7 @@ export default function SettingsView() {
   async function handleSaveRouterConfig() {
     setRouterBusy(true);
     try {
-      const normalized: TaskRouterConfig = {
+      const normalized: TaskRouterConfig = sanitizeRouterConfig({
         version: Number(routerConfig.version || 1),
         areas: Object.fromEntries(
           Object.entries(routerConfig.areas || {}).map(([area, cfg]) => [
@@ -429,8 +488,9 @@ export default function SettingsView() {
             },
           ])
         ),
-      };
+      });
       await saveTaskRouterConfig(normalized);
+      setRouterConfig(normalized);
       showToast("Task Router guardado");
       await refreshRouterMetrics();
     } catch (e) {
@@ -446,7 +506,7 @@ export default function SettingsView() {
       const minSamples = Math.max(4, Number(routerMinSamples || "12"));
       const out = await recalibrateTaskRouter(minSamples);
       const cfg = await getTaskRouterConfig();
-      setRouterConfig(cfg);
+      setRouterConfig(sanitizeRouterConfig(cfg));
       await refreshRouterMetrics();
       showToast(out.count > 0 ? `Recalibrado: ${out.count} áreas ajustadas` : "Sin cambios en recalibración");
     } catch (e) {
@@ -477,6 +537,7 @@ export default function SettingsView() {
   const resolvedLlamacppExecutable = (config.LLAMACPP_EXECUTABLE || installerStatus?.executable || "").trim();
   const controlsOrder = config.WINDOW_CONTROLS_ORDER || "minimize,maximize,close";
   const filteredRouterAreas = Object.entries(routerConfig.areas || {}).filter(([area, cfg]) => {
+    if (isPeritoSoftRouterArea(area, cfg)) return false;
     const q = routerSearch.trim().toLowerCase();
     if (!q) return true;
     return (
@@ -489,6 +550,7 @@ export default function SettingsView() {
   const metricsRows = (() => {
     const rows: Array<{ area: string; model: string; calls: number; success: number; latency: number; retries: number }> = [];
     for (const [area, models] of Object.entries(routerMetrics?.areas || {})) {
+      if (isPeritoSoftRouterArea(area, { profile: "", keywords: [] })) continue;
       for (const [model, m] of Object.entries(models || {})) {
         rows.push({
           area,
@@ -806,7 +868,7 @@ export default function SettingsView() {
             </div>
           </div>
 
-          {Object.keys(routerConfig.areas || {}).length === 0 ? (
+          {filteredRouterAreas.length === 0 && Object.keys(routerConfig.areas || {}).length === 0 ? (
             <p className="text-xs text-muted">No hay áreas de router cargadas.</p>
           ) : filteredRouterAreas.length === 0 ? (
             <p className="text-xs text-muted">No hay áreas que coincidan con el filtro.</p>
@@ -1244,6 +1306,30 @@ export default function SettingsView() {
               />
             </Field>
           )}
+        </Section>
+
+        {/* Developer */}
+        <Section title="Desarrollador">
+          <Field
+            label="Modo desarrollador"
+            hint="Habilita la vista Dev Log con trazas de ejecución, errores detallados y tail del servidor."
+          >
+            <div className="flex items-center justify-between">
+              <Toggle
+                value={devMode}
+                onChange={(v) => setDevMode(v)}
+                label={devMode ? "activado — ver trazas y log en tiempo real" : "desactivado"}
+              />
+              {devMode && (
+                <button
+                  onClick={() => setView("devlog")}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs btn-ghost"
+                >
+                  <Terminal size={13} /> Abrir Dev Log
+                </button>
+              )}
+            </div>
+          </Field>
         </Section>
 
       </div>

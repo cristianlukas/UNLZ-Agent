@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Behavior, ChatMessage, Conversation, Folder, View } from "./types";
+import type { Behavior, ChatMessage, Conversation, Folder, HubUpdateNotification, View } from "./types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +27,8 @@ Usá las herramientas proactivamente para responder con precisión.
 Formateá las respuestas en Markdown. Sé conciso y preciso.`,
     model: "",
     harness: "",
+    defaultInternetEnabled: true,
+    defaultToolsMode: "auto",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -40,6 +42,8 @@ Preferí TypeScript, Python o Rust según el contexto.
 Formateá el código con bloques de código con el lenguaje indicado.`,
     model: "",
     harness: "claude-code",
+    defaultInternetEnabled: true,
+    defaultToolsMode: "auto",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -53,6 +57,8 @@ Citá fuentes cuando sea posible. Sé exhaustivo pero organizado.
 Usá encabezados Markdown para estructurar respuestas largas.`,
     model: "",
     harness: "",
+    defaultInternetEnabled: true,
+    defaultToolsMode: "auto",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -67,6 +73,8 @@ Usá herramientas solo si el usuario pide explícitamente investigar, buscar dat
 Mantené coherencia de contexto y evitá repeticiones innecesarias.`,
     model: "gemma-4-31b-it-q4_k_m",
     harness: "",
+    defaultInternetEnabled: true,
+    defaultToolsMode: "without_tools",
     createdAt: 0,
     updatedAt: 0,
   },
@@ -84,32 +92,52 @@ Reglas:
 - Cuando corresponda, proponé una segunda pasada enfocada en zonas críticas.`,
     model: "gemma-4-31b-it-q4_k_m",
     harness: "",
+    defaultInternetEnabled: true,
+    defaultToolsMode: "with_tools",
     createdAt: 0,
     updatedAt: 0,
   },
 ];
 
+function normalizeBehaviorRecord(b: Behavior): Behavior {
+  const normalizedToolsMode =
+    b.defaultToolsMode === "with_tools" || b.defaultToolsMode === "without_tools" || b.defaultToolsMode === "auto"
+      ? b.defaultToolsMode
+      : "auto";
+  const baseBehavior: Behavior = {
+    ...b,
+    harness: (b.harness || "").trim(),
+    defaultInternetEnabled:
+      typeof b.defaultInternetEnabled === "boolean" ? b.defaultInternetEnabled : true,
+    defaultToolsMode: normalizedToolsMode,
+  };
+  const isHeretic = /heretic/i.test(String(b.id || "")) || /heretic/i.test(String(b.name || ""));
+  if (b.id === "default-chat-gemma") {
+    return {
+      ...baseBehavior,
+      name: b.name?.trim() ? b.name : "Charla",
+      model: (b.model || "").trim() || "gemma-4-31b-it-q4_k_m",
+      defaultToolsMode: normalizedToolsMode === "auto" ? "without_tools" : normalizedToolsMode,
+    };
+  }
+  if (b.id === "default-dev") {
+    return {
+      ...baseBehavior,
+      harness: (b.harness || "").trim() || "claude-code",
+    };
+  }
+  if (isHeretic) {
+    return {
+      ...baseBehavior,
+      defaultInternetEnabled: false,
+    };
+  }
+  return baseBehavior;
+}
+
 function mergeDefaultBehaviors(existing?: Behavior[]): Behavior[] {
   const current = existing ? [...existing] : [];
-  const normalized = current.map((b) => {
-    if (b.id === "default-chat-gemma") {
-      return {
-        ...b,
-        name: b.name?.trim() ? b.name : "Charla",
-        model: (b.model || "").trim() || "gemma-4-31b-it-q4_k_m",
-      };
-    }
-    if (b.id === "default-dev") {
-      return {
-        ...b,
-        harness: (b.harness || "").trim() || "claude-code",
-      };
-    }
-    return {
-      ...b,
-      harness: (b.harness || "").trim(),
-    };
-  });
+  const normalized = current.map((b) => normalizeBehaviorRecord(b));
   const existingIds = new Set(normalized.map((b) => b.id));
   const missingDefaults = DEFAULT_BEHAVIORS.filter((b) => !existingIds.has(b.id));
   return [...normalized, ...missingDefaults];
@@ -127,6 +155,9 @@ interface AppStore {
   setAgentReady: (v: boolean) => void;
   llmReady: boolean;
   setLlmReady: (v: boolean) => void;
+  llmState: "ready" | "loading" | "not_loaded";
+  llmStateMessage: string;
+  setLlmStatus: (state: "ready" | "loading" | "not_loaded", message?: string) => void;
   provider: string;
   modelAlias: string;
   setProviderInfo: (provider: string, alias: string) => void;
@@ -148,15 +179,38 @@ interface AppStore {
 
   // Behaviors
   behaviors: Behavior[];
-  createBehavior: (name: string, content: string, icon?: string, model?: string, harness?: string) => string;
+  createBehavior: (
+    name: string,
+    content: string,
+    icon?: string,
+    model?: string,
+    harness?: string,
+    defaultInternetEnabled?: boolean,
+    defaultToolsMode?: Behavior["defaultToolsMode"],
+    llamacpp?: Behavior["llamacpp"]
+  ) => string;
   updateBehavior: (id: string, updates: Partial<Omit<Behavior, "id" | "createdAt">>) => void;
   deleteBehavior: (id: string) => void;
+  upsertBehaviors: (items: Behavior[]) => void;
 
   // Folders
   folders: Folder[];
   createFolder: (name: string) => string;
   updateFolder: (id: string, updates: Partial<Omit<Folder, "id" | "createdAt">>) => void;
   deleteFolder: (id: string) => void;
+
+  // Dev mode
+  devMode: boolean;
+  setDevMode: (v: boolean) => void;
+
+  // Hub — update notifications (partially persisted)
+  hubUpdateNotification: HubUpdateNotification | null;
+  setHubUpdateNotification: (n: HubUpdateNotification | null) => void;
+  skippedHubModelIds: string[];          // persisted: never show again for this model
+  snoozedHubUntil: number | null;        // persisted: snooze timestamp
+  skipHubModel: (modelId: string) => void;
+  snoozeHubUpdate: (ms?: number) => void; // default 24 h
+  clearHubSnooze: () => void;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -173,6 +227,9 @@ export const useStore = create<AppStore>()(
       setAgentReady: (v) => set({ agentReady: v }),
       llmReady: false,
       setLlmReady: (v) => set({ llmReady: v }),
+      llmState: "not_loaded",
+      llmStateMessage: "",
+      setLlmStatus: (state, message) => set({ llmState: state, llmStateMessage: message ?? "" }),
       provider: "…",
       modelAlias: "…",
       setProviderInfo: (provider, modelAlias) => set({ provider, modelAlias }),
@@ -283,13 +340,34 @@ export const useStore = create<AppStore>()(
       // ── Behaviors ────────────────────────────────────────────────────────────
       behaviors: DEFAULT_BEHAVIORS,
 
-      createBehavior: (name, content, icon, model, harness) => {
+      createBehavior: (
+        name,
+        content,
+        icon,
+        model,
+        harness,
+        defaultInternetEnabled = true,
+        defaultToolsMode = "auto",
+        llamacpp
+      ) => {
         const id = uid();
         const now = Date.now();
         set((s) => ({
           behaviors: [
             ...s.behaviors,
-            { id, name, content, icon, model, harness, createdAt: now, updatedAt: now },
+            {
+              id,
+              name,
+              content,
+              icon,
+              model,
+              harness,
+              defaultInternetEnabled,
+              defaultToolsMode,
+              llamacpp,
+              createdAt: now,
+              updatedAt: now,
+            },
           ],
         }));
         return id;
@@ -313,6 +391,19 @@ export const useStore = create<AppStore>()(
             f.behaviorId === id ? { ...f, behaviorId: undefined, updatedAt: Date.now() } : f
           ),
         })),
+
+      upsertBehaviors: (items) =>
+        set((s) => {
+          if (!items?.length) return { behaviors: s.behaviors };
+          const byId = new Map(s.behaviors.map((b) => [b.id, b] as const));
+          for (const it of items) {
+            if (!it?.id) continue;
+            const prev = byId.get(it.id);
+            const merged = prev ? ({ ...prev, ...it } as Behavior) : (it as Behavior);
+            byId.set(it.id, normalizeBehaviorRecord(merged));
+          }
+          return { behaviors: Array.from(byId.values()) };
+        }),
 
       // ── Folders ────────────────────────────────────────────────────────────
       folders: [],
@@ -348,6 +439,26 @@ export const useStore = create<AppStore>()(
             c.folderId === id ? { ...c, folderId: undefined, updatedAt: Date.now() } : c
           ),
         })),
+
+      // ── Dev mode ─────────────────────────────────────────────────────────────
+      devMode: false,
+      setDevMode: (v) => set({ devMode: v }),
+
+      // ── Hub ──────────────────────────────────────────────────────────────────
+      hubUpdateNotification: null,
+      setHubUpdateNotification: (n) => set({ hubUpdateNotification: n }),
+      skippedHubModelIds: [],
+      snoozedHubUntil: null,
+      skipHubModel: (modelId) =>
+        set((s) => ({
+          skippedHubModelIds: s.skippedHubModelIds.includes(modelId)
+            ? s.skippedHubModelIds
+            : [...s.skippedHubModelIds, modelId],
+        })),
+      snoozeHubUpdate: (ms = 24 * 60 * 60 * 1000) =>
+        set({ snoozedHubUntil: Date.now() + ms }),
+      clearHubSnooze: () =>
+        set({ snoozedHubUntil: null }),
     }),
     {
       name: "unlz-agent-store",
@@ -358,6 +469,9 @@ export const useStore = create<AppStore>()(
         activeConvId: s.activeConvId,
         behaviors: s.behaviors,
         folders: s.folders,
+        skippedHubModelIds: s.skippedHubModelIds,
+        snoozedHubUntil: s.snoozedHubUntil,
+        devMode: s.devMode,
       }),
       merge: (persisted, current) => {
         const p = (persisted as Partial<AppStore>) || {};

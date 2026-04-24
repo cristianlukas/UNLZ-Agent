@@ -81,6 +81,10 @@ It also shows a language selector (Spanish/English) and uses `icon.ico` as setup
   - `Install/Update llama.cpp` button to install or update automatically and auto-configure baseline paths
   - default install location: `<install_dir>/llama.cpp` (models: `<install_dir>/llama.cpp/models`)
   - `↻` rescan button for new models while app is running
+- **Behavior-level llama.cpp overrides**:
+  - in `Comportamientos`, each profile can override llama runtime args (`context size`, `-ngl`, `flash attn`, `cache K/V`, `extra args`)
+  - those values apply only while that behavior is active
+  - global `Configuración` values remain baseline defaults
 - **Plan mode**: chat button, affects first send only
 - **Iterator mode**: staged autonomous execution + validation
 - **Folders**:

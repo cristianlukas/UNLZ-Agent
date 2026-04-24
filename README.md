@@ -47,6 +47,16 @@ Documentación técnica:
   - agrupan conversaciones
   - permiten comportamiento base + prompt personalizado por carpeta
   - soportan documentos exclusivos por carpeta
+- Comportamientos con runtime por perfil:
+  - cada comportamiento puede definir `model` + `harness`
+  - además puede definir overrides de `llama.cpp`:
+    - `context size`
+    - `gpu layers (-ngl)`
+    - `flash attention`
+    - `cache type k/v`
+    - `extra args`
+  - precedencia: `Configuración general` (default) -> `override del comportamiento` (si existe)
+  - los overrides aplican sólo cuando ese comportamiento está activo
 - Modo de ejecución de acciones:
   - `confirm` (pregunta antes de ejecutar)
   - `autonomous` (ejecución directa)
@@ -151,6 +161,10 @@ La configuración vive en `.env` (editable desde UI o archivo):
 - `WINDOW_CONTROLS_SIDE=left|right`
 - `WINDOW_CONTROLS_ORDER=minimize,maximize,close` (u otra permutación)
 - `LLAMACPP_*`, `OLLAMA_*`, `OPENAI_*`, `SUPABASE_*`
+
+Precedencia de configuración de modelo en runtime:
+- Base global: valores `LLAMACPP_*` en `.env` / Configuración.
+- Por comportamiento: si el comportamiento activo define overrides de llama.cpp, esos valores se aplican para esa conversación y sobrescriben temporalmente el global.
 
 Referencia inicial: `.env.example`.
 

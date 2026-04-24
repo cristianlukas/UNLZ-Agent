@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Send, RefreshCw, Wrench, ChevronDown, Brain, Plus, Pencil, Check, X } from "lucide-react";
+import { Send, RefreshCw, Wrench, ChevronDown, Brain, Plus, Pencil, Check, X, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { getSettings, runApprovedWindowsCommand, saveSettings, streamChat } from "../lib/api";
+import { cancelRun, getSettings, runApprovedWindowsCommand, saveSettings, streamChat, uploadFolderFile } from "../lib/api";
 import type { AgentStep, ChatMessage } from "../lib/types";
 import { useStore, useActiveConv, useActiveBehavior, useActiveFolder } from "../lib/store";
 import unlzLogo from "../assets/unlz-logo.png";
@@ -13,6 +13,9 @@ let _msgId = Date.now();
 const uid = () => String(++_msgId);
 type SendMode = "normal" | "plan" | "iterate" | "simple";
 type StreamPhase = "sending" | "routing" | "tools" | "generating";
+type ResponseDepthHint = "quick" | "detailed" | null;
+type AgentMode = "auto" | "iterate" | "simple";
+type ToolsUsageMode = "auto" | "with_tools" | "without_tools";
 
 // ─── Tool step ────────────────────────────────────────────────────────────────
 
@@ -52,6 +55,141 @@ function inferCommandLanguage(command: string): string {
   if (c.includes("def ") || c.includes("import ") || c.includes("print(")) return "python";
   if (c.includes("function ") || c.includes("console.log(") || c.includes("=>")) return "javascript";
   return "text";
+}
+
+function inferEmbeddedCodeLanguage(block: string): string {
+  const t = String(block || "").trim();
+  const low = t.toLowerCase();
+  if (!t) return "text";
+  if (low.startsWith("<!doctype html") || low.startsWith("<html") || /<\/[a-z][^>]*>/i.test(t)) return "html";
+  if (low.includes(":root") || /[.#][a-z0-9_-]+\s*\{/.test(low)) return "css";
+  if (low.includes("function ") || low.includes("const ") || low.includes("let ") || low.includes("=>")) return "javascript";
+  if (low.includes("new-item") || low.includes("set-content") || low.includes("get-childitem") || low.includes("write-host")) return "powershell";
+  return inferCommandLanguage(t);
+}
+
+function buildCodeFence(lang: string, body: string): string {
+  const safe = String(body || "").replace(/```/g, "``\\`");
+  const info = String(lang || "text").trim() || "text";
+  return `\`\`\`${info}\n${safe}\n\`\`\``;
+}
+
+function formatCommandAsMarkdown(rawCmd: string): string {
+  const cmd = String(rawCmd || "").trim();
+  if (!cmd) return `Comando:\n\n${buildCodeFence("text", "(sin comando)")}\n`;
+
+  const pieces: string[] = [];
+  const hs = /@['"]([\s\S]*?)['"]@/g;
+  let last = 0;
+  let m: RegExpExecArray | null = null;
+  let hadEmbedded = false;
+
+  while ((m = hs.exec(cmd)) !== null) {
+    const start = m.index;
+    const end = hs.lastIndex;
+    const before = cmd.slice(last, start).trim();
+    const inner = String(m[1] || "").trim();
+    if (before) {
+      pieces.push(buildCodeFence("powershell", before));
+    }
+    if (inner) {
+      const lang = inferEmbeddedCodeLanguage(inner);
+      pieces.push(buildCodeFence(lang, inner));
+      hadEmbedded = true;
+    }
+    last = end;
+  }
+
+  const tail = cmd.slice(last).trim();
+  if (tail) {
+    const lang = hadEmbedded ? "powershell" : inferCommandLanguage(tail);
+    pieces.push(buildCodeFence(lang, tail));
+  }
+
+  if (pieces.length === 0) {
+    pieces.push(buildCodeFence(inferCommandLanguage(cmd), cmd));
+  }
+
+  return `Comando:\n\n${pieces.join("\n\n")}\n`;
+}
+
+function normalizeAssistantMarkdown(content: string): string {
+  let text = String(content || "");
+  if (!text.trim()) return text;
+
+  // Some backend chunks arrive with escaped newlines; render them as real lines.
+  if (text.includes("\\n")) {
+    text = text.replace(/\\n/g, "\n");
+  }
+
+  // If a command block is embedded in plain text, wrap it as fenced code so
+  // markdown doesn't blend code and prose.
+  const markerRegex = /\n(?:(?:###\s*Etapa)|(?:Etapa\s+\d+\/\d+:)|(?:Etapa validada:)|(?:Intento\s+\d+:)|(?:##\s*Iteracion finalizada))/i;
+  let out = "";
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const cmdPos = text.indexOf("Comando:", cursor);
+    if (cmdPos < 0) {
+      out += text.slice(cursor);
+      break;
+    }
+    out += text.slice(cursor, cmdPos);
+
+    const afterLabel = cmdPos + "Comando:".length;
+    const remaining = text.slice(afterLabel);
+    const markerMatch = remaining.match(markerRegex);
+    const endPos = markerMatch?.index != null ? afterLabel + markerMatch.index : text.length;
+
+    let rawCmd = text.slice(afterLabel, endPos).trim();
+    if (rawCmd.startsWith("`") && rawCmd.endsWith("`") && rawCmd.length >= 2) {
+      rawCmd = rawCmd.slice(1, -1).trim();
+    }
+
+    out += formatCommandAsMarkdown(rawCmd);
+    cursor = endPos;
+  }
+
+  // Ensure raw HTML documents are also highlighted as code when they leak into logs.
+  out = out.replace(
+    /(^|\n)(<!DOCTYPE html>[\s\S]*?<\/html>)(?=\n|$)/gi,
+    (_m, p1, p2) => `${p1}${buildCodeFence("html", p2)}`
+  );
+
+  // Normalize any tilde fences from upstream into backtick fences so the UI
+  // has a single, consistent parser path.
+  out = out.replace(/^[ \t]{0,3}~~~[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/gm, (_m, info) => {
+    const lang = String(info || "").trim();
+    return `\`\`\`${lang}`;
+  });
+
+  // Auto-close an unmatched backtick fence to avoid swallowing the rest.
+  const fenceCount = (out.match(/^[ \t]{0,3}```[ \t]*[A-Za-z0-9_+-]*[ \t]*$/gm) || []).length;
+  if (fenceCount % 2 === 1) {
+    out += "\n```\n";
+  }
+
+  return out;
+}
+
+function collapseDiagnosticLines(content: string): { visible: string; hiddenCount: number } {
+  const src = String(content || "").replace(/\r/g, "");
+  if (!src.trim()) return { visible: src, hiddenCount: 0 };
+  const kept: string[] = [];
+  let hiddenCount = 0;
+  for (const line of src.split("\n")) {
+    const t = line.trim();
+    const isValidation = /^etapa validada:\s*validaci[oó]n?\s+heur[ií]stica\s+aplicada\.?$/i.test(t);
+    const isExecutionAttempt = /^intento\s+\d+:\s*(acci[oó]n ejecutada correctamente\.?|comando ejecutado\.?)$/i.test(t);
+    if (isValidation || isExecutionAttempt) {
+      hiddenCount += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  // Collapse excessive empty lines left after removing validation lines.
+  const visible = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { visible, hiddenCount };
 }
 
 function extractPendingCommandApproval(msg: ChatMessage): PendingCommandApproval | null {
@@ -126,6 +264,47 @@ function summarizeCommandAction(result: {
   };
 }
 
+function extractPlanAlternatives(text: string): string[] {
+  const src = (text || "").replace(/\r/g, "");
+  if (!src.trim()) return [];
+  const lines = src.split("\n").map((l) => l.trim());
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const m = line.match(/^(?:-\s*)?(\d+)[\.\)]\s+(.+)$/);
+    if (!m) continue;
+    const label = m[2].trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+function isPlanMessage(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  return (
+    t.includes("plan propuesto") ||
+    t.includes("plan consolidado") ||
+    t.includes("decisión requerida") ||
+    t.includes("decision requerida")
+  );
+}
+
+function hasPlanFinalChoices(text: string): boolean {
+  const t = (text || "").toLowerCase();
+  const hasExecute = t.includes("ejecutar plan") || t.includes("ejecutar el plan");
+  const hasEdit = t.includes("editar plan") || t.includes("editar el plan") || t.includes("editarlo");
+  const hasDiscard = t.includes("descartar plan") || t.includes("descartar") || t.includes("descartarlo");
+  return (t.includes("plan consolidado") || t.includes("cierre de planificación") || t.includes("cierre de planificacion"))
+    && hasExecute
+    && hasEdit
+    && hasDiscard;
+}
+
 function ToolStep({ step }: { step: AgentStep }) {
   if (step.tool === "command_confirmation_required" || step.tool === "command_confirmation_resolved") {
     return null;
@@ -155,6 +334,14 @@ function Message({
   onRejectCommand,
   onSuggestCommandEdit,
   commandBusy,
+  planWorkflowActive,
+  onChoosePlanAlternative,
+  planUiLocked,
+  onPlanExecute,
+  onPlanEdit,
+  onPlanDiscard,
+  onPlanOther,
+  onPlanRefreshAlternatives,
 }: {
   msg: ChatMessage;
   isStreaming: boolean;
@@ -164,12 +351,27 @@ function Message({
   onRejectCommand?: (msg: ChatMessage, payload: PendingCommandApproval) => void;
   onSuggestCommandEdit?: (msg: ChatMessage, payload: PendingCommandApproval, suggestion: string) => void;
   commandBusy?: boolean;
+  planWorkflowActive?: boolean;
+  onChoosePlanAlternative?: (choice: string) => void;
+  planUiLocked?: boolean;
+  onPlanExecute?: () => void;
+  onPlanEdit?: () => void;
+  onPlanDiscard?: () => void;
+  onPlanOther?: () => void;
+  onPlanRefreshAlternatives?: () => void;
 }) {
   const isUser = msg.role === "user";
   const pendingApproval = !isUser ? extractPendingCommandApproval(msg) : null;
+  const isPlanAssistantMessage = !isUser && isPlanMessage(msg.content || "");
+  const messagePlanAlternatives = isPlanAssistantMessage ? extractPlanAlternatives(msg.content || "") : [];
+  const showPlanFinalActions = isPlanAssistantMessage && hasPlanFinalChoices(msg.content || "");
   const [showTechnical, setShowTechnical] = useState(false);
+  const [showDiagnosticsInPlace, setShowDiagnosticsInPlace] = useState(false);
   const [showSuggestInput, setShowSuggestInput] = useState(false);
   const [suggestionText, setSuggestionText] = useState("");
+  const collapsedDiagnostics = collapseDiagnosticLines(msg.content || "");
+  const contentForRender = showDiagnosticsInPlace ? (msg.content || "") : collapsedDiagnostics.visible;
+  const hiddenDiagnosticsCount = collapsedDiagnostics.hiddenCount;
 
   if (isUser) {
     return (
@@ -221,29 +423,39 @@ function Message({
               : "bg-raised border border-border"
           }`}
         >
-          {msg.content ? (
+          {contentForRender ? (
             <div className="prose-chat selectable">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 components={{
                   code({ className, children, ...props }) {
                     const match = /language-(\w+)/.exec(className ?? "");
-                    return match ? (
-                      <SyntaxHighlighter
-                        style={oneDark as never}
-                        language={match[1]}
-                        PreTag="div"
-                        customStyle={{ margin: 0, borderRadius: 6, fontSize: "0.78em" }}
-                      >
-                        {String(children).replace(/\n$/, "")}
-                      </SyntaxHighlighter>
-                    ) : (
-                      <code className={className} {...props}>{children}</code>
+                    const raw = String(children ?? "");
+                    const isInline = !match && !raw.includes("\n");
+                    if (isInline) {
+                      return <code className={className} {...props}>{children}</code>;
+                    }
+                    return (
+                      <details className="mt-2 rounded-lg border border-border/70 bg-base/60">
+                        <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[11px] text-muted hover:text-primary">
+                          Ver código{match?.[1] ? ` (${match[1]})` : ""}
+                        </summary>
+                        <div className="px-2.5 pb-2.5">
+                          <SyntaxHighlighter
+                            style={oneDark as never}
+                            language={match?.[1] ?? "text"}
+                            PreTag="div"
+                            customStyle={{ margin: 0, borderRadius: 6, fontSize: "0.78em" }}
+                          >
+                            {raw.replace(/\n$/, "")}
+                          </SyntaxHighlighter>
+                        </div>
+                      </details>
                     );
                   },
                 }}
               >
-                {msg.content}
+                {normalizeAssistantMarkdown(contentForRender)}
               </ReactMarkdown>
             </div>
           ) : isStreaming ? (
@@ -264,6 +476,18 @@ function Message({
             <p className="mt-2 text-[10px] text-muted">Confianza estimada: {(msg.confidence * 100).toFixed(0)}%</p>
           )}
         </div>
+        {hiddenDiagnosticsCount > 0 && (
+          <div className="mt-2">
+            <button
+              onClick={() => setShowDiagnosticsInPlace((p) => !p)}
+              className="btn-ghost text-[11px] px-2 py-1"
+            >
+              {showDiagnosticsInPlace
+                ? "Ocultar validaciones y ejecuciones"
+                : `Ver validaciones y ejecuciones (${hiddenDiagnosticsCount})`}
+            </button>
+          </div>
+        )}
         {msg.technicalDetails && (
           <div className="mt-2">
             <button
@@ -347,6 +571,80 @@ function Message({
             )}
           </div>
         )}
+        {!pendingApproval && messagePlanAlternatives.length > 0 && (
+          <div className="mt-2 rounded-xl border border-accent/25 bg-accent/10 p-2.5">
+            <p className="text-[11px] text-accent mb-2">Elegí una alternativa para continuar:</p>
+            <div className="flex flex-wrap gap-2">
+              {messagePlanAlternatives.map((alt) => (
+                <button
+                  key={alt}
+                  disabled={!!planUiLocked}
+                  onClick={() => onChoosePlanAlternative?.(alt)}
+                  className="btn-ghost text-xs px-2.5 py-1 border-accent/30 text-accent hover:bg-accent/10 max-w-[460px] truncate disabled:opacity-40"
+                  title={alt}
+                >
+                  {alt}
+                </button>
+              ))}
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanOther}
+                className="btn-ghost text-xs px-2.5 py-1 border-border disabled:opacity-40"
+              >
+                Otra (escribirla)
+              </button>
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanRefreshAlternatives}
+                className="btn-ghost text-xs px-2.5 py-1 border-accent/30 text-accent disabled:opacity-40"
+              >
+                Pedir alternativas nuevas
+              </button>
+            </div>
+          </div>
+        )}
+        {showPlanFinalActions && (
+          <div className="mt-2 rounded-xl border border-border bg-base/40 p-2.5">
+            <p className="text-[11px] text-muted mb-2">Decisión final del plan:</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanExecute}
+                className="btn-ghost text-xs px-2.5 py-1 border-green-900/40 text-green-400 hover:bg-green-900/10 disabled:opacity-40"
+              >
+                Ejecutar plan
+              </button>
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanEdit}
+                className="btn-ghost text-xs px-2.5 py-1 disabled:opacity-40"
+              >
+                Editar plan
+              </button>
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanDiscard}
+                className="btn-ghost text-xs px-2.5 py-1 border-red-900/40 text-red-400 hover:bg-red-900/10 disabled:opacity-40"
+              >
+                Descartar
+              </button>
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanOther}
+                className="btn-ghost text-xs px-2.5 py-1 border-border disabled:opacity-40"
+              >
+                Otra (escribirla)
+              </button>
+              <button
+                disabled={!!planUiLocked}
+                onClick={onPlanRefreshAlternatives}
+                className="btn-ghost text-xs px-2.5 py-1 border-accent/30 text-accent disabled:opacity-40"
+              >
+                Pedir alternativas nuevas
+              </button>
+            </div>
+          </div>
+        )}
         {canEdit && onEdit && (
           <button
             onClick={onEdit}
@@ -391,7 +689,7 @@ function BehaviorBadge() {
         onClick={() => setOpen((p) => !p)}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border transition-colors
           ${behavior
-            ? "bg-accent/10 border-accent/25 text-accent hover:bg-accent/15"
+            ? "bg-raised border-accent/40 text-primary hover:bg-accent/10"
             : "bg-raised border-border text-muted hover:text-primary hover:border-border-strong"
           }`}
         title="Comportamiento activo"
@@ -406,7 +704,7 @@ function BehaviorBadge() {
           <button
             onClick={() => assignBehavior(undefined)}
             className={`w-full text-left px-3 py-2 text-xs hover:bg-base transition-colors ${
-              !conv.behaviorId ? "text-accent" : "text-secondary"
+              !conv.behaviorId ? "text-primary" : "text-secondary"
             }`}
           >
             Sin comportamiento
@@ -417,7 +715,7 @@ function BehaviorBadge() {
               key={b.id}
               onClick={() => assignBehavior(b.id)}
               className={`w-full text-left px-3 py-2 text-xs hover:bg-base transition-colors ${
-                conv.behaviorId === b.id ? "text-accent" : "text-secondary"
+                conv.behaviorId === b.id ? "text-primary" : "text-secondary"
               }`}
             >
               {b.icon ?? "🤖"} {b.name}
@@ -488,6 +786,7 @@ function ActiveChat({ convId }: { convId: string }) {
     clearConversation,
     consumePendingDraft,
     setConversationFolder,
+    createFolder,
   } = useStore();
   const behaviors = useStore((s) => s.behaviors);
   const folders = useStore((s) => s.folders);
@@ -500,8 +799,7 @@ function ActiveChat({ convId }: { convId: string }) {
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
-  const [iteratorMode, setIteratorMode] = useState(false);
-  const [simpleMode, setSimpleMode] = useState(false);
+  const [agentMode, setAgentMode] = useState<AgentMode>("auto");
   const [planArmed, setPlanArmed] = useState(false);
   const [planWorkflowActive, setPlanWorkflowActive] = useState(false);
   const [commandBusyByMsgId, setCommandBusyByMsgId] = useState<Record<string, boolean>>({});
@@ -509,23 +807,43 @@ function ActiveChat({ convId }: { convId: string }) {
   const [execModeBusy, setExecModeBusy] = useState(false);
   const [globalHarness, setGlobalHarness] = useState("native");
   const [streamPhase, setStreamPhase] = useState<StreamPhase>("sending");
+  const [responseDepthHint, setResponseDepthHint] = useState<ResponseDepthHint>(null);
+  const [activeSendMode, setActiveSendMode] = useState<SendMode>("normal");
+  const [internetEnabled, setInternetEnabled] = useState(true);
+  const [toolsUsageMode, setToolsUsageMode] = useState<ToolsUsageMode>("auto");
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const initializedConvRef = useRef<string | null>(null);
   const streamInFlightRef = useRef(false);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const activeAssistantIdRef = useRef<string | null>(null);
+  const currentRunIdRef = useRef<string | null>(null);
+  const manualInternetRef = useRef(false);
+  const manualToolsModeRef = useRef(false);
 
   const messages = conv?.messages ?? [];
-  const uiLocked = !agentReady || !llmReady || isStreaming;
+  const hasPendingAssistant = messages.some((m) => m.role === "assistant" && !!m.pending && !m.error);
+  const uiStreaming = isStreaming || hasPendingAssistant;
+  const uiLocked = !agentReady || !llmReady || uiStreaming;
   const lockMessage = !agentReady
     ? "Iniciando agente…"
     : !llmReady
       ? "Cargando modelo…"
-      : isStreaming
+      : uiStreaming
         ? (
             streamPhase === "routing"
-              ? "Planificando respuesta…"
+              ? (
+                  activeSendMode === "plan"
+                    ? "Planificando respuesta…"
+                    : responseDepthHint === "quick"
+                      ? "Pensando respuesta rápida…"
+                      : responseDepthHint === "detailed"
+                        ? "Pensando respuesta detallada…"
+                        : "Enrutando respuesta…"
+                )
               : streamPhase === "tools"
                 ? "Ejecutando herramientas…"
                 : streamPhase === "generating"
@@ -574,12 +892,44 @@ function ActiveChat({ convId }: { convId: string }) {
     return "";
   }
 
+  function buildLlamacppOverrides(): Record<string, unknown> {
+    const src = behavior?.llamacpp
+      ?? (activeFolder?.behaviorId ? behaviors.find((b) => b.id === activeFolder.behaviorId)?.llamacpp : undefined);
+    if (!src) return {};
+    const out: Record<string, unknown> = {};
+    if (typeof src.contextSize === "number" && Number.isFinite(src.contextSize)) out.context_size = src.contextSize;
+    if (typeof src.gpuLayers === "number" && Number.isFinite(src.gpuLayers)) out.n_gpu_layers = src.gpuLayers;
+    if (typeof src.flashAttn === "boolean") out.flash_attn = src.flashAttn;
+    if ((src.cacheTypeK || "").trim()) out.cache_type_k = String(src.cacheTypeK).trim();
+    if ((src.cacheTypeV || "").trim()) out.cache_type_v = String(src.cacheTypeV).trim();
+    if ((src.extraArgs || "").trim()) out.extra_args = String(src.extraArgs).trim();
+    return out;
+  }
+
+  function resolveBehaviorDefaults(): { internetEnabled: boolean; toolsMode: ToolsUsageMode } {
+    const fromConvBehavior = behavior;
+    const fromFolderBehavior =
+      activeFolder?.behaviorId ? behaviors.find((b) => b.id === activeFolder.behaviorId) : undefined;
+    const src = fromConvBehavior ?? fromFolderBehavior;
+    const isHeretic =
+      /heretic/i.test(String(src?.id || "")) || /heretic/i.test(String(src?.name || ""));
+    const toolsMode: ToolsUsageMode =
+      src?.defaultToolsMode === "with_tools" || src?.defaultToolsMode === "without_tools"
+        ? src.defaultToolsMode
+        : "auto";
+    const internetEnabled =
+      isHeretic
+        ? false
+        : (typeof src?.defaultInternetEnabled === "boolean" ? src.defaultInternetEnabled : true);
+    return { internetEnabled, toolsMode };
+  }
+
   const effectiveHarness = (buildHarnessOverride() || globalHarness || "native").trim().toLowerCase();
   const harnessToggleSupport = {
-    plan: effectiveHarness === "native",
-    iterate: effectiveHarness === "native",
-    simple: effectiveHarness === "native",
-    executionMode: effectiveHarness === "native",
+    // UX: toggles are always visible regardless of active harness.
+    plan: true,
+    agentModeSelector: true,
+    executionMode: true,
   };
 
   const scrollToBottom = useCallback((smooth = true) => {
@@ -587,8 +937,8 @@ function ActiveChat({ convId }: { convId: string }) {
   }, []);
 
   useEffect(() => {
-    if (isStreaming) scrollToBottom();
-  }, [messages, isStreaming, scrollToBottom]);
+    if (uiStreaming) scrollToBottom();
+  }, [messages, uiStreaming, scrollToBottom]);
 
   // Reset scroll on conv change
   useEffect(() => {
@@ -597,10 +947,14 @@ function ActiveChat({ convId }: { convId: string }) {
     scrollToBottom(false);
     setEditingId(null);
     setEditingText("");
-    setIteratorMode(false);
-    setSimpleMode(false);
+    setAgentMode("auto");
     setPlanArmed(false);
     setPlanWorkflowActive(false);
+    manualInternetRef.current = false;
+    manualToolsModeRef.current = false;
+    const defaults = resolveBehaviorDefaults();
+    setInternetEnabled(defaults.internetEnabled);
+    setToolsUsageMode(defaults.toolsMode);
     const draft = consumePendingDraft(convId);
     setInput(draft);
     setTimeout(() => {
@@ -617,8 +971,8 @@ function ActiveChat({ convId }: { convId: string }) {
     getSettings()
       .then((cfg) => {
         if (cancelled) return;
-        const mode = String(cfg.AGENT_EXECUTION_MODE ?? "confirm").trim().toLowerCase();
         const harness = String(cfg.AGENT_HARNESS ?? "native").trim().toLowerCase();
+        const mode = String(cfg.AGENT_EXECUTION_MODE ?? "confirm").trim().toLowerCase();
         setAutonomousExec(mode === "autonomous");
         setGlobalHarness(harness || "native");
       })
@@ -633,9 +987,18 @@ function ActiveChat({ convId }: { convId: string }) {
 
   useEffect(() => {
     if (!harnessToggleSupport.plan) setPlanArmed(false);
-    if (!harnessToggleSupport.iterate) setIteratorMode(false);
-    if (!harnessToggleSupport.simple) setSimpleMode(false);
-  }, [harnessToggleSupport.plan, harnessToggleSupport.iterate, harnessToggleSupport.simple]);
+    if (!harnessToggleSupport.agentModeSelector) setAgentMode("auto");
+  }, [harnessToggleSupport.plan, harnessToggleSupport.agentModeSelector]);
+
+  useEffect(() => {
+    const defaults = resolveBehaviorDefaults();
+    if (!manualInternetRef.current) {
+      setInternetEnabled(defaults.internetEnabled);
+    }
+    if (!manualToolsModeRef.current) {
+      setToolsUsageMode(defaults.toolsMode);
+    }
+  }, [behavior?.id, behavior?.defaultInternetEnabled, behavior?.defaultToolsMode, activeFolder?.id, activeFolder?.behaviorId, behaviors]);
 
   function setConversationMessages(nextMessages: ChatMessage[]) {
     useStore.setState((s) => ({
@@ -643,6 +1006,48 @@ function ActiveChat({ convId }: { convId: string }) {
         c.id === convId ? { ...c, messages: nextMessages, updatedAt: Date.now() } : c
       ),
     }));
+  }
+
+  function buildConversationFolderName(): string {
+    const baseTitle = (conv?.title || "Conversación").trim() || "Conversación";
+    const safe = baseTitle.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
+    const short = safe.length > 48 ? `${safe.slice(0, 48)}…` : safe;
+    return `Adjuntos - ${short}`;
+  }
+
+  async function ensureConversationFolderId(): Promise<string> {
+    const existing = (conv?.folderId || "").trim();
+    if (existing) return existing;
+    const newFolderId = createFolder(buildConversationFolderName());
+    setConversationFolder(convId, newFolderId);
+    return newFolderId;
+  }
+
+  async function attachFilesToConversation(files: File[]): Promise<void> {
+    const clean = files.filter((f) => !!f);
+    if (clean.length === 0) return;
+    try {
+      const folderId = await ensureConversationFolderId();
+      const uploaded: string[] = [];
+      for (const f of clean) {
+        const res = await uploadFolderFile(folderId, f);
+        uploaded.push(res.filename || f.name);
+      }
+      upsertMessage(convId, {
+        id: uid(),
+        role: "user",
+        content: `📎 Adjunté ${uploaded.length} archivo(s) a esta conversación: ${uploaded.join(", ")}.\nTomalos como contexto para la próxima respuesta.`,
+        ts: Date.now(),
+      });
+    } catch (e) {
+      upsertMessage(convId, {
+        id: uid(),
+        role: "assistant",
+        content: `No pude adjuntar archivos a la conversación: ${e}`,
+        error: true,
+        ts: Date.now(),
+      });
+    }
   }
 
   async function streamAssistantReply(
@@ -654,18 +1059,26 @@ function ActiveChat({ convId }: { convId: string }) {
     streamInFlightRef.current = true;
 
     const assistantId = uid();
+    activeAssistantIdRef.current = assistantId;
     const assistantMsg: ChatMessage = {
       id: assistantId,
       role: "assistant",
       content: "",
+      pending: true,
       steps: [],
       ts: Date.now(),
     };
 
     upsertMessage(convId, assistantMsg);
-    setStreamPhase(mode === "simple" ? "generating" : "sending");
+    const expectedSimple = mode === "simple";
+    setActiveSendMode(mode);
+    setResponseDepthHint(null);
+    setStreamPhase(expectedSimple ? "generating" : "sending");
     setIsStreaming(true);
     setTimeout(() => scrollToBottom(false), 0);
+    const abortCtrl = new AbortController();
+    streamAbortRef.current = abortCtrl;
+    currentRunIdRef.current = null;
 
     try {
       for await (const event of streamChat(
@@ -674,14 +1087,19 @@ function ActiveChat({ convId }: { convId: string }) {
         buildSystemPrompt(),
         buildModelOverride(),
         buildHarnessOverride(),
+        buildLlamacppOverrides(),
         conv?.folderId,
         activeFolder?.sandboxPath,
         mode,
         convId,
-        false
+        false,
+        internetEnabled,
+        toolsUsageMode,
+        abortCtrl.signal
       )) {
         if (event.type === "run") {
-          setStreamPhase(mode === "simple" ? "generating" : "routing");
+          currentRunIdRef.current = event.run_id;
+          setStreamPhase(expectedSimple ? "generating" : "routing");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -689,8 +1107,16 @@ function ActiveChat({ convId }: { convId: string }) {
           upsertMessage(convId, {
             ...(current ?? assistantMsg),
             runId: event.run_id,
+            pending: true,
           });
         } else if (event.type === "step") {
+          if ((event.text || "") === "response.depth_router") {
+            const route = String((event.args as Record<string, unknown> | undefined)?.route || "").toLowerCase();
+            if (route === "quick" || route === "detailed") {
+              setResponseDepthHint(route as ResponseDepthHint);
+              setStreamPhase("routing");
+            }
+          }
           const isTaskRouterStep = (event.text || "").startsWith("task_router");
           if (mode === "simple" && isTaskRouterStep) {
             // In simple mode we hide router internals from UI and keep direct generation state.
@@ -704,6 +1130,7 @@ function ActiveChat({ convId }: { convId: string }) {
           }
           upsertMessage(convId, {
             ...assistantMsg,
+            pending: true,
             steps: [
               ...(useStore.getState().conversations.find((c) => c.id === convId)
                 ?.messages.find((m) => m.id === assistantId)?.steps ?? []),
@@ -719,6 +1146,7 @@ function ActiveChat({ convId }: { convId: string }) {
           upsertMessage(convId, {
             ...(current ?? assistantMsg),
             content: (current?.content ?? "") + event.text,
+            pending: true,
           });
         } else if (event.type === "confidence") {
           const current = useStore
@@ -728,6 +1156,7 @@ function ActiveChat({ convId }: { convId: string }) {
           upsertMessage(convId, {
             ...(current ?? assistantMsg),
             confidence: event.score,
+            pending: true,
           });
         } else if (event.type === "error") {
           const current = useStore
@@ -738,13 +1167,39 @@ function ActiveChat({ convId }: { convId: string }) {
             ...(current ?? assistantMsg),
             content: event.text,
             error: true,
+            pending: false,
           });
           break;
         } else if (event.type === "done") {
+          const current = useStore
+            .getState()
+            .conversations.find((c) => c.id === convId)
+            ?.messages.find((m) => m.id === assistantId);
+          if (current) {
+            upsertMessage(convId, {
+              ...current,
+              pending: false,
+            });
+          }
           break;
         }
       }
     } catch (e) {
+      const em = String(e || "").toLowerCase();
+      const isAbort = em.includes("abort") || em.includes("aborted");
+      if (isAbort) {
+        const current = useStore
+          .getState()
+          .conversations.find((c) => c.id === convId)
+          ?.messages.find((m) => m.id === assistantId);
+        upsertMessage(convId, {
+          ...(current ?? assistantMsg),
+          content: (current?.content || "").trim() || "Generación detenida por el usuario.",
+          pending: false,
+          error: false,
+        });
+        return;
+      }
       const current = useStore
         .getState()
         .conversations.find((c) => c.id === convId)
@@ -753,12 +1208,56 @@ function ActiveChat({ convId }: { convId: string }) {
         ...(current ?? assistantMsg),
         content: `Error de conexión: ${e}`,
         error: true,
+        pending: false,
       });
     } finally {
       setIsStreaming(false);
       setStreamPhase("sending");
+      setResponseDepthHint(null);
+      setActiveSendMode("normal");
+      streamAbortRef.current = null;
+      currentRunIdRef.current = null;
+      activeAssistantIdRef.current = null;
       streamInFlightRef.current = false;
     }
+  }
+
+  async function stopCurrentProcessing() {
+    const runId = currentRunIdRef.current;
+    if (runId) {
+      try {
+        await cancelRun(runId);
+      } catch {
+        // best effort
+      }
+    }
+    try {
+      streamAbortRef.current?.abort();
+    } catch {
+      // ignore
+    }
+    const stateConv = useStore.getState().conversations.find((c) => c.id === convId);
+    const msgs = stateConv?.messages ?? [];
+    let touched = false;
+    const next = msgs.map((m) => {
+      if (!m.pending) return m;
+      touched = true;
+      return {
+        ...m,
+        content: (m.content || "").trim() || "Generación detenida por el usuario.",
+        pending: false,
+        error: false,
+      };
+    });
+    if (touched) setConversationMessages(next);
+    setIsStreaming(false);
+    setStreamPhase("sending");
+    setResponseDepthHint(null);
+    setActiveSendMode("normal");
+    currentRunIdRef.current = null;
+    activeAssistantIdRef.current = null;
+    streamAbortRef.current = null;
+    streamInFlightRef.current = false;
   }
 
   function markCommandDecision(msgId: string, decision: "approved" | "rejected" | "suggest_edit") {
@@ -805,6 +1304,21 @@ function ActiveChat({ convId }: { convId: string }) {
         ts: Date.now(),
       });
       markCommandDecision(msg.id, "approved");
+
+      // Auto-resume the original task after user approval, so the agent does
+      // not stop at a single confirmed command.
+      const continuePrompt = [
+        "Continuá automáticamente con la tarea original del usuario.",
+        "El comando aprobado ya fue ejecutado.",
+        "Si faltan pasos, proponelos y ejecutalos según la política actual.",
+        "Si ya está completo, devolvé un resumen breve de lo realizado.",
+      ].join(" ");
+      const history = useStore
+        .getState()
+        .conversations.find((c) => c.id === convId)
+        ?.messages.map((m) => ({ role: m.role, content: m.content })) ?? [];
+      const resumeMode: SendMode = agentMode === "iterate" ? "iterate" : "normal";
+      await streamAssistantReply(continuePrompt, history, resumeMode);
     } catch (e) {
       upsertMessage(convId, {
         id: assistantId,
@@ -859,9 +1373,10 @@ function ActiveChat({ convId }: { convId: string }) {
     await streamAssistantReply(prompt, history, "normal");
   }
 
-  async function handleToggleExecutionMode() {
+  async function handleExecutionModeSelect(nextMode: "confirm" | "autonomous") {
     if (execModeBusy) return;
-    const next = !autonomousExec;
+    const next = nextMode === "autonomous";
+    if (next === autonomousExec) return;
     setExecModeBusy(true);
     try {
       await saveSettings({
@@ -873,6 +1388,25 @@ function ActiveChat({ convId }: { convId: string }) {
     }
   }
 
+  function handleToggleInternetMode() {
+    if (uiLocked) return;
+    manualInternetRef.current = true;
+    setInternetEnabled((prev) => !prev);
+  }
+
+  function handleToolsUsageModeSelect(next: ToolsUsageMode) {
+    if (uiLocked) return;
+    manualToolsModeRef.current = true;
+    setToolsUsageMode(next);
+  }
+
+  function togglePlanMode() {
+    setPlanArmed((prev) => {
+      const next = !prev;
+      return next;
+    });
+  }
+
   function handleScroll() {
     const el = listRef.current;
     if (!el) return;
@@ -882,7 +1416,7 @@ function ActiveChat({ convId }: { convId: string }) {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || isStreaming || streamInFlightRef.current) return;
+    if (!text || uiStreaming || streamInFlightRef.current) return;
 
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -892,7 +1426,7 @@ function ActiveChat({ convId }: { convId: string }) {
     const history = messages.map((m) => ({ role: m.role, content: m.content }));
     const low = text.toLowerCase();
     let mode: SendMode = "normal";
-    if (planArmed && messages.length === 0) {
+    if (planArmed) {
       mode = "plan";
       setPlanArmed(false);
       setPlanWorkflowActive(true);
@@ -908,23 +1442,68 @@ function ActiveChat({ convId }: { convId: string }) {
       } else {
         mode = "plan";
       }
-    } else if (iteratorMode) {
-      mode = "iterate";
-    } else if (simpleMode) {
+    } else if (agentMode === "simple") {
       mode = "simple";
+    } else if (agentMode === "iterate") {
+      mode = "iterate";
     }
     await streamAssistantReply(text, history, mode);
   }
 
+  async function choosePlanAlternative(choice: string) {
+    const selected = choice.trim();
+    if (!selected || uiStreaming || streamInFlightRef.current) return;
+    const text = `Elijo esta alternativa: ${selected}`;
+    const userMsg: ChatMessage = { id: uid(), role: "user", content: text, ts: Date.now() };
+    upsertMessage(convId, userMsg);
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    await streamAssistantReply(text, history, "plan");
+  }
+
+  async function executeCurrentPlan() {
+    if (uiStreaming || streamInFlightRef.current) return;
+    const txt = "ejecutar plan";
+    const userMsg: ChatMessage = { id: uid(), role: "user", content: txt, ts: Date.now() };
+    upsertMessage(convId, userMsg);
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    setPlanWorkflowActive(false);
+    await streamAssistantReply(txt, history, "iterate");
+  }
+
+  function editCurrentPlan() {
+    setInput("editar plan: ");
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function discardCurrentPlan() {
+    setPlanWorkflowActive(false);
+    setInput("descartar plan");
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  function writeOtherPlanOption() {
+    setInput("otra: ");
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }
+
+  async function requestNewPlanAlternatives() {
+    if (uiStreaming || streamInFlightRef.current) return;
+    const txt = "pedir alternativas nuevas";
+    const userMsg: ChatMessage = { id: uid(), role: "user", content: txt, ts: Date.now() };
+    upsertMessage(convId, userMsg);
+    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    await streamAssistantReply(txt, history, "plan");
+  }
+
   function startEdit(msg: ChatMessage) {
-    if (isStreaming) return;
+    if (uiStreaming) return;
     setEditingId(msg.id);
     setEditingText(msg.content);
   }
 
   async function saveEditAndRecalculate(msg: ChatMessage) {
     const newText = editingText.trim();
-    if (!newText || isStreaming) return;
+    if (!newText || uiStreaming) return;
 
     const currentConv = useStore.getState().conversations.find((c) => c.id === convId);
     if (!currentConv) return;
@@ -977,6 +1556,29 @@ function ActiveChat({ convId }: { convId: string }) {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }
 
+  function handleClickAttach() {
+    if (uiLocked) return;
+    fileInputRef.current?.click();
+  }
+
+  async function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    e.currentTarget.value = "";
+    if (files.length === 0) return;
+    await attachFilesToConversation(files);
+  }
+
+  async function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageFiles = items
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => !!f);
+    if (imageFiles.length === 0) return;
+    e.preventDefault();
+    await attachFilesToConversation(imageFiles);
+  }
+
   const userTurns = messages.filter((m) => m.role === "user").length;
 
   function setConversationBehavior(behaviorId: string | undefined) {
@@ -1000,7 +1602,7 @@ function ActiveChat({ convId }: { convId: string }) {
             value={conv?.folderId ?? ""}
             onChange={(e) => setConversationFolder(convId, e.target.value || undefined)}
             disabled={uiLocked}
-            className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-secondary"
+            className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-primary"
             title="Carpeta de la conversación"
           >
             <option value="">Sin carpeta</option>
@@ -1085,7 +1687,7 @@ function ActiveChat({ convId }: { convId: string }) {
                     </button>
                     <button
                       onClick={() => saveEditAndRecalculate(msg)}
-                      disabled={msg.role === "user" && (!agentReady || !llmReady || isStreaming)}
+                      disabled={msg.role === "user" && (!agentReady || !llmReady || uiStreaming)}
                       className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1 disabled:opacity-40"
                     >
                       <Check size={12} />
@@ -1098,13 +1700,24 @@ function ActiveChat({ convId }: { convId: string }) {
             <Message
                 key={msg.id}
                 msg={msg}
-                isStreaming={isStreaming && i === messages.length - 1 && msg.role === "assistant"}
+                isStreaming={
+                  (isStreaming && i === messages.length - 1 && msg.role === "assistant") ||
+                  (msg.role === "assistant" && !!msg.pending && !msg.error)
+                }
                 canEdit={!uiLocked}
                 onEdit={() => startEdit(msg)}
                 onApproveCommand={handleApproveCommand}
                 onRejectCommand={handleRejectCommand}
                 onSuggestCommandEdit={handleSuggestCommandEdit}
                 commandBusy={!!commandBusyByMsgId[msg.id]}
+                planWorkflowActive={planWorkflowActive}
+                onChoosePlanAlternative={(choice) => { void choosePlanAlternative(choice); }}
+                planUiLocked={uiStreaming}
+                onPlanExecute={() => { void executeCurrentPlan(); }}
+                onPlanEdit={editCurrentPlan}
+                onPlanDiscard={discardCurrentPlan}
+                onPlanOther={writeOtherPlanOption}
+                onPlanRefreshAlternatives={() => { void requestNewPlanAlternatives(); }}
               />
             )
           ))
@@ -1124,19 +1737,19 @@ function ActiveChat({ convId }: { convId: string }) {
       {/* Input */}
       <div className="px-4 pb-4 pt-2 shrink-0">
         {uiLocked && (
-          <div className="mb-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs text-accent">
+          <div className="mb-2 rounded-lg border border-border bg-raised px-3 py-2 text-xs text-primary">
             {lockMessage}
           </div>
         )}
         <div className="flex items-center gap-2 mb-2">
           {harnessToggleSupport.plan && (
             <button
-              onClick={() => setPlanArmed((p) => !p)}
+              onClick={togglePlanMode}
               aria-pressed={planArmed}
               disabled={uiLocked}
               className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
                 planArmed
-                  ? "border-accent/50 text-accent bg-accent/15"
+                  ? "border-accent/50 text-primary bg-accent/10"
                   : "border-border text-muted hover:text-primary hover:bg-surface-2"
               } disabled:opacity-40`}
               title="Afecta solo al primer envío de esta conversación"
@@ -1144,109 +1757,107 @@ function ActiveChat({ convId }: { convId: string }) {
               Modo Plan
             </button>
           )}
-          {harnessToggleSupport.iterate && (
-            <button
-              onClick={() => setIteratorMode((p) => !p)}
-              aria-pressed={iteratorMode}
-              disabled={uiLocked}
-              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                iteratorMode
-                  ? "border-accent/50 text-accent bg-accent/15"
-                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
-              } disabled:opacity-40`}
-              title="Modo agente iterador"
-            >
-              Modo Iterador
-            </button>
+          {harnessToggleSupport.agentModeSelector && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-muted">Modo de agente</span>
+              <select
+                value={agentMode}
+                onChange={(e) => setAgentMode(e.target.value as AgentMode)}
+                disabled={uiLocked}
+                className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-primary disabled:opacity-40"
+                title="Automático deja que la IA decida entre normal/agente iterador/chat simple según la tarea"
+              >
+                <option value="auto">Automático</option>
+                <option value="iterate">Modo Agente Iterador</option>
+                <option value="simple">Modo Chat Simple</option>
+              </select>
+            </div>
           )}
-          {harnessToggleSupport.simple && (
-            <button
-              onClick={() => setSimpleMode((p) => !p)}
-              aria-pressed={simpleMode}
+          <button
+            onClick={handleToggleInternetMode}
+            aria-pressed={internetEnabled}
+            disabled={uiLocked}
+            className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
+              internetEnabled
+                ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/10"
+                : "border-border text-muted hover:text-primary hover:bg-surface-2"
+            } disabled:opacity-40`}
+            title="Activa o desactiva herramientas de internet (web search)"
+          >
+            Modo internet {internetEnabled ? "on" : "off"}
+          </button>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-muted">Uso de herramientas</span>
+            <select
+              value={toolsUsageMode}
+              onChange={(e) => handleToolsUsageModeSelect(e.target.value as ToolsUsageMode)}
               disabled={uiLocked}
-              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors ${
-                simpleMode
-                  ? "border-sky-500/50 text-sky-300 bg-sky-500/15"
-                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
-              } disabled:opacity-40`}
-              title="Respuesta directa del modelo (sin usar herramientas)"
+              className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-primary disabled:opacity-40"
+              title="Controla si el agente puede usar herramientas"
             >
-              Modo Chat Simple
-            </button>
-          )}
+              <option value="auto">Automático</option>
+              <option value="with_tools">Con herramientas</option>
+              <option value="without_tools">Sin herramientas</option>
+            </select>
+          </div>
           {harnessToggleSupport.executionMode && (
-            <button
-              onClick={handleToggleExecutionMode}
-              aria-pressed={autonomousExec}
-              disabled={execModeBusy || uiLocked}
-              className={`text-xs px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-40 ${
-                autonomousExec
-                  ? "border-emerald-500/50 text-emerald-300 bg-emerald-500/15"
-                  : "border-border text-muted hover:text-primary hover:bg-surface-2"
-              }`}
-              title="Activa o desactiva ejecutar sin preguntar"
-            >
-              {execModeBusy
-                ? "Actualizando..."
-                : "Modo Sin Preguntar"}
-            </button>
-          )}
-          {planWorkflowActive && (
-            <>
-              <button
-                onClick={async () => {
-                  if (isStreaming) return;
-                  const txt = "ejecutar plan";
-                  const userMsg: ChatMessage = { id: uid(), role: "user", content: txt, ts: Date.now() };
-                  upsertMessage(convId, userMsg);
-                  const history = [...messages, userMsg].slice(0, -1).map((m) => ({ role: m.role, content: m.content }));
-                  setPlanWorkflowActive(false);
-                  await streamAssistantReply(txt, history, "iterate");
-                }}
-                className="btn-ghost text-xs px-2.5 py-1 border-green-900/40 text-green-400 hover:bg-green-900/10"
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-muted">Ejecución</span>
+              <select
+                value={autonomousExec ? "autonomous" : "confirm"}
+                onChange={(e) => { void handleExecutionModeSelect(e.target.value as "confirm" | "autonomous"); }}
+                disabled={execModeBusy || uiLocked}
+                className="bg-raised border border-border rounded-lg px-2 py-1 text-xs text-primary disabled:opacity-40"
+                title="Define si el agente confirma antes de ejecutar comandos"
               >
-                Ejecutar plan
-              </button>
-              <button
-                onClick={() => setInput("editar plan: ")}
-                className="btn-ghost text-xs px-2.5 py-1"
-              >
-                Editar plan
-              </button>
-              <button
-                onClick={() => { setPlanWorkflowActive(false); setInput("descartar plan"); }}
-                className="btn-ghost text-xs px-2.5 py-1 border-red-900/40 text-red-400 hover:bg-red-900/10"
-              >
-                Descartar
-              </button>
-            </>
+                <option value="confirm">Preguntar antes de ejecutar comando</option>
+                <option value="autonomous">Modo ejecutar sin preguntar</option>
+              </select>
+            </div>
           )}
         </div>
         <div className="flex items-end gap-2 bg-raised border border-border rounded-xl p-2 focus-within:border-accent/50 focus-within:shadow-[0_0_0_3px_rgba(124,106,245,0.08)] transition-all">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => { void handleFileInputChange(e); }}
+          />
+          <button
+            onClick={handleClickAttach}
+            disabled={uiLocked}
+            className="btn-ghost shrink-0 w-8 h-8 flex items-center justify-center rounded-lg disabled:opacity-40"
+            title="Adjuntar archivos a la conversación"
+          >
+            <Plus size={14} />
+          </button>
           <textarea
             id="chat-input"
             ref={textareaRef}
             rows={1}
             value={input}
             onChange={handleInputChange}
+            onPaste={(e) => { void handlePaste(e); }}
             onKeyDown={handleKeyDown}
             placeholder={
               !agentReady ? "Esperando al agente…" :
               !llmReady  ? "Cargando modelo LLM… (puede tardar 1-2 min)" :
-              isStreaming ? lockMessage :
+              uiStreaming ? lockMessage :
                             "Escribí tu consulta… (Enter para enviar)"
             }
-            disabled={!agentReady || !llmReady || isStreaming}
+            disabled={!agentReady || !llmReady || uiStreaming}
             className="flex-1 bg-transparent text-sm text-primary placeholder-muted outline-none resize-none leading-relaxed py-1 px-1 selectable disabled:opacity-40"
             style={{ minHeight: 24, maxHeight: 160 }}
           />
           <button
-            onClick={handleSend}
-            disabled={!agentReady || !llmReady || isStreaming || !input.trim()}
+            onClick={uiStreaming ? stopCurrentProcessing : handleSend}
+            disabled={!agentReady || !llmReady || (!uiStreaming && !input.trim())}
             className="btn-primary shrink-0 w-8 h-8 flex items-center justify-center rounded-lg"
+            title={uiStreaming ? "Detener procesamiento" : "Enviar"}
           >
-            {isStreaming ? (
-              <div className="w-3.5 h-3.5 rounded-full border-2 border-white border-t-transparent animate-spin" />
+            {uiStreaming ? (
+              <Square size={13} />
             ) : (
               <Send size={14} />
             )}

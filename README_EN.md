@@ -47,6 +47,16 @@ Technical docs:
   - group conversations
   - support base behavior + custom folder prompt
   - support folder-exclusive documents
+- Behavior-level runtime profiles:
+  - each behavior can define `model` + `harness`
+  - and optional `llama.cpp` overrides:
+    - `context size`
+    - `gpu layers (-ngl)`
+    - `flash attention`
+    - `cache type k/v`
+    - `extra args`
+  - precedence: `global Settings` (default) -> `behavior override` (if present)
+  - overrides apply only while that behavior is active
 - Action execution modes:
   - `confirm` (ask before running)
   - `autonomous` (run directly)
@@ -150,6 +160,10 @@ Config is stored in `.env` (editable from UI or file):
 - `WINDOW_CONTROLS_SIDE=left|right`
 - `WINDOW_CONTROLS_ORDER=minimize,maximize,close` (or other permutation)
 - `LLAMACPP_*`, `OLLAMA_*`, `OPENAI_*`, `SUPABASE_*`
+
+Runtime model precedence:
+- Global baseline: `LLAMACPP_*` values from `.env` / Settings.
+- Per-behavior: if the active behavior defines llama.cpp overrides, those values are applied for that conversation and temporarily override global values.
 
 Use `.env.example` as baseline.
 

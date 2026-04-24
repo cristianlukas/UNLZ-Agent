@@ -132,6 +132,36 @@
         "clasificar pagina",
         "captura"
       ]
+    },
+    "dev_codigo": {
+      "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+      "fallback_models": [
+        "gemma-3-4b-it-q4_0"
+      ],
+      "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+      "keywords": [
+        "codigo",
+        "código",
+        "programa",
+        "script",
+        "frontend",
+        "backend",
+        "api",
+        "html",
+        "css",
+        "javascript",
+        "typescript",
+        "python",
+        "web",
+        "pagina",
+        "página",
+        "react",
+        "vite",
+        "next",
+        "crear web",
+        "crear app",
+        "crear proyecto"
+      ]
     }
   }
 }

@@ -73,6 +73,7 @@ data/runs/
 data/snapshots/
 data/folders/
 data/.unlz_internal/
+data/local_behaviors.json
 
 # Keep only source assets under desktop/src/assets
 desktop/src/assets/*.tmp

@@ -11,7 +11,16 @@ function BehaviorEditor({
   onCancel,
 }: {
   behavior: Partial<Behavior>;
-  onSave: (name: string, content: string, icon: string, model: string, harness: string) => void;
+  onSave: (
+    name: string,
+    content: string,
+    icon: string,
+    model: string,
+    harness: string,
+    defaultInternetEnabled: boolean,
+    defaultToolsMode: "auto" | "with_tools" | "without_tools",
+    llamacpp: Behavior["llamacpp"],
+  ) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(behavior.name ?? "");
@@ -19,6 +28,26 @@ function BehaviorEditor({
   const [content, setContent] = useState(behavior.content ?? "");
   const [model, setModel] = useState(behavior.model ?? "");
   const [harness, setHarness] = useState(behavior.harness ?? "");
+  const [defaultInternetEnabled, setDefaultInternetEnabled] = useState(
+    typeof behavior.defaultInternetEnabled === "boolean" ? behavior.defaultInternetEnabled : true
+  );
+  const [defaultToolsMode, setDefaultToolsMode] = useState<"auto" | "with_tools" | "without_tools">(
+    behavior.defaultToolsMode === "with_tools" || behavior.defaultToolsMode === "without_tools"
+      ? behavior.defaultToolsMode
+      : "auto"
+  );
+  const [llamaContextSize, setLlamaContextSize] = useState(
+    behavior.llamacpp?.contextSize != null ? String(behavior.llamacpp.contextSize) : ""
+  );
+  const [llamaGpuLayers, setLlamaGpuLayers] = useState(
+    behavior.llamacpp?.gpuLayers != null ? String(behavior.llamacpp.gpuLayers) : ""
+  );
+  const [llamaFlashAttn, setLlamaFlashAttn] = useState<boolean | "">(
+    behavior.llamacpp?.flashAttn == null ? "" : behavior.llamacpp.flashAttn
+  );
+  const [llamaCacheTypeK, setLlamaCacheTypeK] = useState(behavior.llamacpp?.cacheTypeK ?? "");
+  const [llamaCacheTypeV, setLlamaCacheTypeV] = useState(behavior.llamacpp?.cacheTypeV ?? "");
+  const [llamaExtraArgs, setLlamaExtraArgs] = useState(behavior.llamacpp?.extraArgs ?? "");
 
   const EMOJI_PRESETS = ["🤖", "🎓", "💻", "🔬", "📝", "🌐", "🎨", "⚙️", "📊", "🧠"];
 
@@ -118,6 +147,83 @@ function BehaviorEditor({
           Si se define, este comportamiento fuerza ese harness para la conversación.
         </p>
       </div>
+      <div className="rounded-lg border border-border p-3 bg-base/50">
+        <h4 className="text-xs font-semibold text-primary mb-2">Defaults de herramientas</h4>
+        <p className="text-[10px] text-muted mb-3">
+          Se aplican al entrar en una conversación con este comportamiento.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+          <label className="flex items-center gap-2 text-xs text-secondary">
+            <input
+              type="checkbox"
+              checked={defaultInternetEnabled}
+              onChange={(e) => setDefaultInternetEnabled(e.target.checked)}
+              className="accent-accent"
+            />
+            Modo internet habilitado
+          </label>
+          <select
+            value={defaultToolsMode}
+            onChange={(e) => setDefaultToolsMode(e.target.value as "auto" | "with_tools" | "without_tools")}
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary outline-none focus:border-accent/50 transition-colors"
+          >
+            <option value="auto">Uso de herramientas: Automático</option>
+            <option value="with_tools">Uso de herramientas: Con herramientas</option>
+            <option value="without_tools">Uso de herramientas: Sin herramientas</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-border p-3 bg-base/50">
+        <h4 className="text-xs font-semibold text-primary mb-2">Llama.cpp overrides (opcional)</h4>
+        <p className="text-[10px] text-muted mb-3">
+          Sobrescriben la configuración global sólo cuando este comportamiento está activo.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+          <input
+            value={llamaContextSize}
+            onChange={(e) => setLlamaContextSize(e.target.value)}
+            placeholder="Context size (ej: 32768)"
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+          />
+          <input
+            value={llamaGpuLayers}
+            onChange={(e) => setLlamaGpuLayers(e.target.value)}
+            placeholder="GPU layers -ngl (ej: 999)"
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+          />
+          <input
+            value={llamaCacheTypeK}
+            onChange={(e) => setLlamaCacheTypeK(e.target.value)}
+            placeholder="cache-type-k (ej: q8_0)"
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+          />
+          <input
+            value={llamaCacheTypeV}
+            onChange={(e) => setLlamaCacheTypeV(e.target.value)}
+            placeholder="cache-type-v (ej: q8_0)"
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+          />
+          <select
+            value={llamaFlashAttn === "" ? "" : llamaFlashAttn ? "true" : "false"}
+            onChange={(e) => {
+              if (!e.target.value) setLlamaFlashAttn("");
+              else setLlamaFlashAttn(e.target.value === "true");
+            }}
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary outline-none focus:border-accent/50 transition-colors"
+          >
+            <option value="">Flash attn: usar global</option>
+            <option value="true">Flash attn: enabled</option>
+            <option value="false">Flash attn: disabled</option>
+          </select>
+          <input
+            value={llamaExtraArgs}
+            onChange={(e) => setLlamaExtraArgs(e.target.value)}
+            placeholder="Extra args (ej: --jinja --threads 8)"
+            className="bg-base border border-border rounded-lg px-3 py-2 text-sm text-primary font-mono outline-none focus:border-accent/50 transition-colors placeholder-muted"
+          />
+        </div>
+      </div>
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-2">
@@ -129,7 +235,29 @@ function BehaviorEditor({
           Cancelar
         </button>
         <button
-          onClick={() => name.trim() && content.trim() && onSave(name.trim(), content, icon, model.trim(), harness.trim())}
+          onClick={() => {
+            if (!name.trim() || !content.trim()) return;
+            const parsedContext = Number.parseInt(llamaContextSize.trim(), 10);
+            const parsedGpuLayers = Number.parseInt(llamaGpuLayers.trim(), 10);
+            const llamaCfg: Behavior["llamacpp"] = {
+              contextSize: Number.isFinite(parsedContext) ? parsedContext : undefined,
+              gpuLayers: Number.isFinite(parsedGpuLayers) ? parsedGpuLayers : undefined,
+              flashAttn: llamaFlashAttn === "" ? undefined : llamaFlashAttn,
+              cacheTypeK: llamaCacheTypeK.trim() || undefined,
+              cacheTypeV: llamaCacheTypeV.trim() || undefined,
+              extraArgs: llamaExtraArgs.trim() || undefined,
+            };
+            onSave(
+              name.trim(),
+              content,
+              icon,
+              model.trim(),
+              harness.trim(),
+              defaultInternetEnabled,
+              defaultToolsMode,
+              llamaCfg
+            );
+          }}
           disabled={!name.trim() || !content.trim()}
           className="btn-primary flex items-center gap-1.5 px-4 py-1.5 text-sm disabled:opacity-40"
         >
@@ -203,6 +331,14 @@ function BehaviorCard({
           Harness: {behavior.harness}
         </p>
       )}
+      <p className="text-[10px] text-muted font-mono">
+        Internet: {behavior.defaultInternetEnabled === false ? "off" : "on"} · Tools: {behavior.defaultToolsMode || "auto"}
+      </p>
+      {behavior.llamacpp && (
+        <p className="text-[10px] text-muted font-mono">
+          llama.cpp: overrides activos
+        </p>
+      )}
 
       <button
         onClick={onUse}
@@ -227,13 +363,41 @@ export default function BehaviorsView() {
     useStore();
   const [editor, setEditor] = useState<EditorState>(null);
 
-  function handleSaveNew(name: string, content: string, icon: string, model: string, harness: string) {
-    createBehavior(name, content, icon, model, harness);
+  function handleSaveNew(
+    name: string,
+    content: string,
+    icon: string,
+    model: string,
+    harness: string,
+    defaultInternetEnabled: boolean,
+    defaultToolsMode: "auto" | "with_tools" | "without_tools",
+    llamacpp: Behavior["llamacpp"],
+  ) {
+    createBehavior(
+      name,
+      content,
+      icon,
+      model,
+      harness,
+      defaultInternetEnabled,
+      defaultToolsMode,
+      llamacpp
+    );
     setEditor(null);
   }
 
-  function handleSaveEdit(id: string, name: string, content: string, icon: string, model: string, harness: string) {
-    updateBehavior(id, { name, content, icon, model, harness });
+  function handleSaveEdit(
+    id: string,
+    name: string,
+    content: string,
+    icon: string,
+    model: string,
+    harness: string,
+    defaultInternetEnabled: boolean,
+    defaultToolsMode: "auto" | "with_tools" | "without_tools",
+    llamacpp: Behavior["llamacpp"],
+  ) {
+    updateBehavior(id, { name, content, icon, model, harness, defaultInternetEnabled, defaultToolsMode, llamacpp });
     setEditor(null);
   }
 
@@ -279,8 +443,18 @@ export default function BehaviorsView() {
             ) : (
               <BehaviorEditor
                 behavior={editor.behavior}
-                onSave={(name, content, icon, model, harness) =>
-                  handleSaveEdit(editor.behavior.id, name, content, icon, model, harness)
+                onSave={(name, content, icon, model, harness, defaultInternetEnabled, defaultToolsMode, llamacpp) =>
+                  handleSaveEdit(
+                    editor.behavior.id,
+                    name,
+                    content,
+                    icon,
+                    model,
+                    harness,
+                    defaultInternetEnabled,
+                    defaultToolsMode,
+                    llamacpp
+                  )
                 }
                 onCancel={() => setEditor(null)}
               />

@@ -11,6 +11,8 @@ import {
   Check,
   X,
   Brain,
+  Sparkles,
+  Terminal,
 } from "lucide-react";
 import { useStore } from "../lib/store";
 import type { Conversation, Folder, View } from "../lib/types";
@@ -65,14 +67,14 @@ function ConvItem({
     <div
       className={`group relative flex items-start gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm
         ${active
-          ? "bg-accent/10 border border-accent/25 text-primary"
+          ? "bg-raised border border-border-strong text-primary"
           : "hover:bg-surface-2 border border-transparent text-secondary hover:text-primary"
         }`}
       onClick={() => !editing && onSelect()}
     >
       <MessageSquare
         size={13}
-        className={`shrink-0 mt-0.5 ${active ? "text-accent" : "text-muted"}`}
+        className={`shrink-0 mt-0.5 ${active ? "text-secondary" : "text-muted"}`}
       />
 
       <div className="flex-1 min-w-0">
@@ -95,7 +97,7 @@ function ConvItem({
         ) : (
           <>
             <p className="text-xs font-medium leading-snug truncate">{conv.title}</p>
-            <p className="text-[10px] text-muted mt-0.5">{timeStr}</p>
+            <p className={`text-[10px] mt-0.5 ${active ? "text-secondary" : "text-muted"}`}>{timeStr}</p>
           </>
         )}
       </div>
@@ -183,10 +185,11 @@ function FolderGroup({
 
 const BOTTOM_NAV: { id: View; icon: React.ReactNode; label: string }[] = [
   { id: "folders",   icon: <FolderClosed size={16} />, label: "Carpetas"        },
-  { id: "behaviors", icon: <Brain size={16} />,    label: "Comportamientos" },
-  { id: "knowledge", icon: <BookOpen size={16} />,  label: "Documentos"      },
-  { id: "system",    icon: <Activity size={16} />,  label: "Sistema"         },
-  { id: "settings",  icon: <Settings size={16} />,  label: "Configuración"   },
+  { id: "behaviors", icon: <Brain size={16} />,        label: "Comportamientos" },
+  { id: "knowledge", icon: <BookOpen size={16} />,     label: "Documentos"      },
+  { id: "hub",       icon: <Sparkles size={16} />,     label: "Modelos"         },
+  { id: "system",    icon: <Activity size={16} />,     label: "Sistema"         },
+  { id: "settings",  icon: <Settings size={16} />,     label: "Configuración"   },
 ];
 
 // ─── ConversationSidebar ──────────────────────────────────────────────────────
@@ -197,7 +200,16 @@ export default function ConversationSidebar() {
     folders,
     conversations, activeConvId,
     createConversation, deleteConversation, renameConversation, setActiveConv,
+    hubUpdateNotification, skippedHubModelIds, snoozedHubUntil,
+    devMode,
   } = useStore();
+
+  const hasHubUpdate = (() => {
+    if (!hubUpdateNotification) return false;
+    const isSnoozed = snoozedHubUntil !== null && Date.now() < snoozedHubUntil;
+    const isSkipped = skippedHubModelIds.includes(hubUpdateNotification.recommended.id);
+    return !isSnoozed && !isSkipped;
+  })();
   const ungrouped = sortConversations(conversations.filter((c) => !c.folderId));
   const byFolder = folders.map((f) => ({
     folder: f,
@@ -275,18 +287,37 @@ export default function ConversationSidebar() {
 
       {/* Bottom nav */}
       <div className="border-t border-border px-2 py-2 flex flex-col gap-0.5">
+        {devMode && (
+          <button
+            onClick={() => setView("devlog")}
+            title="Dev Log"
+            className={`relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs transition-colors w-full text-left
+              ${view === "devlog"
+                ? "bg-accent/10 text-accent"
+                : "text-amber-500/70 hover:text-amber-400 hover:bg-surface-2"
+              }`}
+          >
+            <Terminal size={16} />
+            <span className="font-medium">Dev Log</span>
+          </button>
+        )}
         {BOTTOM_NAV.map((item) => (
           <button
             key={item.id}
             onClick={() => setView(item.id)}
             title={item.label}
-            className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs transition-colors w-full text-left
+            className={`relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-xs transition-colors w-full text-left
               ${view === item.id
                 ? "bg-accent/10 text-accent"
                 : "text-muted hover:text-primary hover:bg-surface-2"
               }`}
           >
-            {item.icon}
+            <span className="relative">
+              {item.icon}
+              {item.id === "hub" && hasHubUpdate && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_4px_rgba(251,191,36,0.7)]" />
+              )}
+            </span>
             <span className="font-medium">{item.label}</span>
           </button>
         ))}

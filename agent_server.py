@@ -16,10 +16,11 @@ import shutil
 import sys
 import tempfile
 import time
+import threading
 import uuid
 import zipfile
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 # ── Redirect stdout/stderr to log when not running in a real terminal ─────────
@@ -70,6 +71,7 @@ def _install_stdio_file_log() -> None:
 _install_stdio_file_log()
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncGenerator, Optional
 
 import uvicorn
@@ -77,7 +79,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Project root on sys.path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -127,6 +129,52 @@ def _http_reachable(url: str, timeout: float = 1.5) -> bool:
         return False
 
 
+def _http_get_text(url: str, timeout: float = 1.5) -> tuple[int, str]:
+    """Tiny HTTP GET helper returning status and body text (no proxy side effects)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return 0, ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, port, timeout=timeout)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        raw = resp.read()
+        try:
+            txt = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            txt = ""
+        return int(resp.status), txt
+    except Exception:
+        return 0, ""
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _llamacpp_api_healthy(timeout: float = 1.5) -> bool:
+    """
+    Strict llama.cpp API probe.
+    `/health` can return 200 for non-llama services bound to the same port,
+    so validate `/v1/models` JSON shape.
+    """
+    base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
+    status, body = _http_get_text(f"{base}/v1/models", timeout=timeout)
+    if not (200 <= status < 300) or not body.strip():
+        return False
+    try:
+        data = json.loads(body)
+    except Exception:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("data"), list)
+
+
 def _reload_config_runtime() -> None:
     """Refresh Config class attributes from current process env/.env."""
     load_dotenv(dotenv_path=_env_path(), override=True)
@@ -160,6 +208,8 @@ def _reload_config_runtime() -> None:
     Config.LLAMACPP_CACHE_TYPE_V = os.getenv("LLAMACPP_CACHE_TYPE_V", "")
     Config.LLAMACPP_EXTRA_ARGS = os.getenv("LLAMACPP_EXTRA_ARGS", "")
     Config.LLAMACPP_MODELS_DIR = os.getenv("LLAMACPP_MODELS_DIR", "")
+    Config.LLAMACPP_AUTO_START = os.getenv("LLAMACPP_AUTO_START", "true").lower() in ("1", "true", "yes", "on")
+    Config.LLAMACPP_AUTO_START_COOLDOWN_SEC = int(os.getenv("LLAMACPP_AUTO_START_COOLDOWN_SEC", "12"))
     Config.N8N_ENABLED = os.getenv("N8N_ENABLED", "true").lower() == "true"
     Config.N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "http://127.0.0.1:5678/webhook/chat")
 
@@ -246,6 +296,110 @@ def _find_first_gguf(root: Path) -> Optional[Path]:
         return None
 
 
+def _scan_gguf_models() -> list[dict]:
+    """Return discovered GGUF candidates from configured/common roots."""
+    search_roots: set[Path] = set()
+
+    def add_if_exists(p: Path) -> None:
+        try:
+            if p.exists():
+                search_roots.add(p.resolve())
+        except (OSError, PermissionError):
+            pass
+
+    models_dir = Config.LLAMACPP_MODELS_DIR or os.getenv("LLAMACPP_MODELS_DIR", "")
+    if models_dir:
+        add_if_exists(Path(models_dir))
+
+    if Config.LLAMACPP_MODEL_PATH:
+        p = Path(Config.LLAMACPP_MODEL_PATH)
+        add_if_exists(p.parent.parent)
+        add_if_exists(p.parent)
+
+    userprofile = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
+    for rel in ("Models\\llamacpp", "Models", "models\\llamacpp", "models"):
+        if userprofile:
+            add_if_exists(Path(userprofile) / rel)
+
+    try:
+        add_if_exists(Path.home() / "Models" / "llamacpp")
+        add_if_exists(Path.home() / "Models")
+    except Exception:
+        pass
+
+    models: list[dict] = []
+    seen: set[str] = set()
+    for root in search_roots:
+        try:
+            for gguf in root.rglob("*.gguf"):
+                key = str(gguf).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    size_gb = round(gguf.stat().st_size / 1024 ** 3, 1)
+                except OSError:
+                    size_gb = 0.0
+                stem = gguf.stem
+                alias = _slug_alias(stem)
+                models.append({
+                    "path": str(gguf),
+                    "name": gguf.name,
+                    "stem": stem,
+                    "alias": alias,
+                    "size_gb": size_gb,
+                    "folder": gguf.parent.name,
+                })
+        except (PermissionError, OSError):
+            continue
+    models.sort(key=lambda m: (m["folder"], m["name"]))
+    return models
+
+
+def _load_local_behaviors() -> list[dict]:
+    """
+    Load local-only behaviors from DATA_DIR/local_behaviors.json.
+    This file is intended for machine-local profiles (excluded from git).
+    """
+    path = Path(Config.DATA_DIR) / "local_behaviors.json"
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    now = int(time.time() * 1000)
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if not name or not content:
+            continue
+        bid = str(item.get("id") or "").strip() or f"local-{_slug_alias(name)}"
+        tools_mode = str(item.get("defaultToolsMode") or "auto")
+        if tools_mode not in ("auto", "with_tools", "without_tools"):
+            tools_mode = "auto"
+        out.append({
+            "id": bid,
+            "name": name,
+            "content": content,
+            "icon": str(item.get("icon") or "🜏").strip() or "🜏",
+            "model": str(item.get("model") or "").strip(),
+            "harness": str(item.get("harness") or "").strip(),
+            "defaultInternetEnabled": bool(item.get("defaultInternetEnabled", True)),
+            "defaultToolsMode": tools_mode,
+            "createdAt": int(item.get("createdAt") or now),
+            "updatedAt": int(item.get("updatedAt") or now),
+            "localOnly": True,
+        })
+    return out
+
+
 def _harness_install_root() -> Path:
     return _runtime_root_dir() / "data" / ".unlz_internal" / "harnesses"
 
@@ -311,12 +465,48 @@ def _claude_code_installed() -> bool:
     return bool(_claude_code_bin())
 
 
+def _which_any(candidates: list[str]) -> str:
+    for name in candidates:
+        p = shutil.which(name)
+        if p:
+            return p
+    return ""
+
+
+def _npm_bin() -> str:
+    found = _which_any(["npm", "npm.cmd", "npm.exe"])
+    if found:
+        return found
+    # Common Windows Node.js install locations
+    roots = [
+        os.getenv("ProgramFiles", ""),
+        os.getenv("ProgramFiles(x86)", ""),
+        os.getenv("LocalAppData", ""),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        p = Path(root) / "nodejs" / "npm.cmd"
+        if p.exists():
+            return str(p)
+    return ""
+
+
 def _opencode_bin() -> str:
     configured = (os.getenv("HARNESS_OPENCODE_BIN") or getattr(Config, "HARNESS_OPENCODE_BIN", "") or "").strip()
     if configured and Path(configured).exists():
         return configured
-    detected = shutil.which("opencode")
-    return detected or ""
+    detected = _which_any(["opencode", "opencode.cmd", "opencode.exe"])
+    if detected:
+        return detected
+    # npm global bin on Windows (often not in PATH for packaged apps)
+    appdata = os.getenv("APPDATA", "")
+    if appdata:
+        for name in ("opencode.cmd", "opencode.exe", "opencode"):
+            p = Path(appdata) / "npm" / name
+            if p.exists():
+                return str(p)
+    return ""
 
 
 def _opencode_version(bin_path: str) -> str:
@@ -436,34 +626,6 @@ def _is_action_request(text: str) -> bool:
         "borra", "elimina", "move", "mueve", "rename", "renombra", "mkdir",
     )
     return any(k in t for k in keywords)
-
-
-def _is_smalltalk_request(text: str) -> bool:
-    t = re.sub(r"\s+", " ", (text or "").strip().lower())
-    if not t:
-        return False
-    smalltalk_tokens = (
-        "hola",
-        "buenas",
-        "buen día",
-        "buen dia",
-        "buenas tardes",
-        "buenas noches",
-        "qué tal",
-        "que tal",
-        "como estas",
-        "cómo estás",
-        "como va",
-        "cómo va",
-        "hello",
-        "hi",
-        "hey",
-        "how are you",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    )
-    return any(tok in t for tok in smalltalk_tokens)
 
 
 def _tools_for_message(text: str) -> list[dict]:
@@ -637,6 +799,34 @@ def _persist_trace(run_id: str, trace: dict) -> None:
     _trace_path(run_id).write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_active_run_cancels: dict[str, asyncio.Event] = {}
+_active_run_cancels_lock = threading.Lock()
+
+
+def _register_run_cancel(run_id: str) -> asyncio.Event:
+    ev = asyncio.Event()
+    with _active_run_cancels_lock:
+        _active_run_cancels[run_id] = ev
+    return ev
+
+
+def _unregister_run_cancel(run_id: str) -> None:
+    with _active_run_cancels_lock:
+        _active_run_cancels.pop(run_id, None)
+
+
+def _set_run_cancel(run_id: str) -> bool:
+    with _active_run_cancels_lock:
+        ev = _active_run_cancels.get(run_id)
+    if not ev:
+        return False
+    try:
+        ev.set()
+    except Exception:
+        return False
+    return True
+
+
 def _snapshot_path(conversation_id: str) -> Path:
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", (conversation_id or "").strip())[:80] or "default"
     return _snapshots_dir() / f"{safe}.json"
@@ -791,6 +981,16 @@ _TASK_ROUTER_DEFAULT = {
             "profile": "gemma3_4b_q40_jsonfmt",
             "keywords": ["rag", "fuentes", "base documental", "conocimiento local", "documentos"],
         },
+        "dev_codigo": {
+            "primary_model": "qwen3.6-35b-a3b-unsloth-q4_k_m",
+            "fallback_models": ["gemma-3-4b-it-q4_0"],
+            "profile": "qwen36_35b_unsloth_q4km_tuned_cache_jsonfmt",
+            "keywords": [
+                "codigo", "código", "programa", "script", "frontend", "backend", "api",
+                "html", "css", "javascript", "typescript", "python", "web", "pagina", "página",
+                "react", "vite", "next", "crear web", "crear app", "crear proyecto"
+            ],
+        },
         "chat_general": {
             "primary_model": "gemma-3-4b-it-q4_0",
             "fallback_models": ["qwen3.6-35b-a3b-unsloth-q4_k_m"],
@@ -836,6 +1036,41 @@ def _emit_telemetry(event: str, payload: dict) -> None:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def _devlog_trace_enabled() -> bool:
+    raw = (os.getenv("AGENT_DEVLOG_TRACE", "true") or "true").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _devlog_emit_trace(event: dict[str, Any]) -> None:
+    """
+    Emit structured trace events to agent_server.log so Dev Log can display
+    full process traces in real-time (not only post-run JSON traces).
+    """
+    if not _devlog_trace_enabled():
+        return
+    try:
+        p = _runtime_root_dir() / "agent_server.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        ev = dict(event or {})
+        # Keep log readable and bounded.
+        txt = str(ev.get("text") or "")
+        if len(txt) > 240:
+            ev["text"] = txt[:240] + "…"
+        args = ev.get("args")
+        if isinstance(args, dict):
+            clipped: dict[str, Any] = {}
+            for k, v in args.items():
+                sv = str(v)
+                clipped[k] = (sv[:220] + "…") if len(sv) > 220 else v
+            ev["args"] = clipped
+        line = "[trace] " + json.dumps(ev, ensure_ascii=False)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        # Never break runtime due to debug logging.
+        pass
+
+
 def _task_router_path() -> Path:
     data_dir = Path(Config.DATA_DIR)
     internal_dir = data_dir / ".unlz_internal"
@@ -864,6 +1099,16 @@ def _load_task_router() -> dict:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("areas"), dict):
             raise ValueError("invalid task router shape")
+        # Forward-compat: inject newly added default areas without overriding user customizations.
+        data_areas = data.get("areas") or {}
+        for area_name, area_cfg in (_TASK_ROUTER_DEFAULT.get("areas") or {}).items():
+            if area_name not in data_areas:
+                data_areas[area_name] = area_cfg
+        data["areas"] = data_areas
+        try:
+            _save_task_router(data)
+        except Exception:
+            pass
         return data
     except Exception:
         p.write_text(json.dumps(_TASK_ROUTER_DEFAULT, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -880,8 +1125,6 @@ def _classify_task_area(message: str, mode: str = "normal") -> tuple[str, float,
     text = (message or "").lower()
     if mode == "plan":
         return "chat_general", 0.6, "mode=plan"
-    if mode == "iterate":
-        return "resumen_asignacion", 0.6, "mode=iterate"
 
     best_area = "chat_general"
     best_score = 0
@@ -902,6 +1145,24 @@ def _classify_task_area(message: str, mode: str = "normal") -> tuple[str, float,
     return best_area, round(confidence, 2), f"keyword matches={best_score}"
 
 
+def _looks_like_multistep_build_task(message: str) -> bool:
+    t = (message or "").lower()
+    if not t.strip():
+        return False
+    verbs = (
+        "crear", "hacé", "hace", "armá", "arma", "build", "make", "generá", "genera",
+        "implementá", "implementa", "desarrollá", "desarrolla",
+    )
+    targets = (
+        "pagina web", "página web", "sitio web", "web", "landing", "app", "aplicacion", "aplicación",
+        "proyecto", "frontend", "backend", "html", "react", "vite", "next", "django", "flask",
+    )
+    has_verb = any(v in t for v in verbs)
+    has_target = any(x in t for x in targets)
+    has_path_hint = ("c:\\" in t) or ("/" in t and ("home" in t or "users" in t))
+    return has_verb and (has_target or has_path_hint)
+
+
 def _resolve_task_route(area: str) -> dict:
     router = _load_task_router()
     areas = router.get("areas", {})
@@ -914,13 +1175,40 @@ def _resolve_task_route(area: str) -> dict:
     }
 
 
+def _model_chain_key(model_name: str) -> str:
+    return str(model_name or "").strip().casefold()
+
+
 def _build_model_chain(base_model: str, route: dict) -> list[str]:
     chain: list[str] = []
+    seen: set[str] = set()
     for m in [route.get("primary_model"), *(route.get("fallback_models") or []), base_model]:
         mm = str(m or "").strip()
-        if mm and mm not in chain:
+        mk = _model_chain_key(mm)
+        if mm and mk and mk not in seen:
+            seen.add(mk)
             chain.append(mm)
+    # llama.cpp serves one loaded model at a time; cross-model fallback chains
+    # cause long sequential timeouts. Keep chain short by default.
+    provider = (Config.LLM_PROVIDER or "").strip().lower()
+    if provider == "llamacpp":
+        single = (os.getenv("LLAMACPP_SINGLE_MODEL_CHAIN", "true") or "true").strip().lower() in ("1", "true", "yes", "on")
+        max_chain = 1 if single else max(1, min(int(os.getenv("LLAMACPP_MAX_MODEL_CHAIN", "2")), 4))
+        if chain:
+            return chain[:max_chain]
+        bm = str(base_model or "").strip()
+        return [bm] if bm else []
     return chain or [base_model]
+
+
+def _normal_chat_timeout_sec() -> Optional[int]:
+    try:
+        v = int(str(os.getenv("NORMAL_CHAT_TIMEOUT_SEC", "0")).strip())
+        if v <= 0:
+            return None
+        return max(10, min(180, v))
+    except Exception:
+        return None
 
 
 def _route_with_model_override(route: dict, model_override: str) -> dict:
@@ -929,11 +1217,15 @@ def _route_with_model_override(route: dict, model_override: str) -> dict:
         return route
     fallback = [str(x) for x in (route.get("fallback_models") or []) if str(x).strip()]
     prev_primary = str(route.get("primary_model") or "").strip()
-    if prev_primary and prev_primary != preferred:
+    if prev_primary and _model_chain_key(prev_primary) != _model_chain_key(preferred):
         fallback = [prev_primary, *fallback]
     dedup: list[str] = []
+    seen: set[str] = set()
+    preferred_key = _model_chain_key(preferred)
     for m in fallback:
-        if m and m != preferred and m not in dedup:
+        mk = _model_chain_key(m)
+        if m and mk and mk != preferred_key and mk not in seen:
+            seen.add(mk)
             dedup.append(m)
     updated = dict(route or {})
     updated["primary_model"] = preferred
@@ -1079,18 +1371,340 @@ def _recalibrate_router(min_samples: int = 12) -> dict:
     return {"changes": changes, "count": len(changes), "min_samples": min_samples}
 
 
-async def _chat_create_with_fallback(client, model_chain: list[str], **kwargs):
-    errors = []
+def _normalize_messages_for_jinja(messages: Any) -> Any:
+    """
+    llama.cpp chat templates (jinja) can require that `system` is strictly first.
+    Normalize messages by merging all system messages into one leading system entry.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    system_parts: list[str] = []
+    non_system: list[dict[str, Any]] = []
+
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "").strip().lower()
+        if role == "system":
+            txt = str(m.get("content") or "").strip()
+            if txt:
+                system_parts.append(txt)
+            continue
+        non_system.append(m)
+
+    if not system_parts:
+        return non_system
+
+    merged_system = {"role": "system", "content": "\n\n".join(system_parts)}
+    return [merged_system] + non_system
+
+
+async def _chat_create_with_fallback(
+    client,
+    model_chain: list[str],
+    cancel_event: Optional[asyncio.Event] = None,
+    **kwargs,
+):
+    """
+    Try each model in the chain.
+    - If the response lacks `.choices` (SDK v2 / misbehaving llama.cpp) and the
+      request contained `tools`, silently retry that same model without tools so
+      plain-text-only models can still answer.
+    - Raises RuntimeError when every model+attempt fails.
+    """
+    errors: list[str] = []
     retries = 0
-    for idx, m in enumerate(model_chain):
+    kwargs_base = dict(kwargs)
+    raw_timeout = kwargs_base.pop("timeout", None)
+    req_timeout: Optional[float] = None
+    try:
+        if raw_timeout is not None:
+            req_timeout = max(0.1, float(raw_timeout))
+    except Exception:
+        req_timeout = None
+    if "messages" in kwargs_base:
+        kwargs_base["messages"] = _normalize_messages_for_jinja(kwargs_base.get("messages"))
+
+    has_tools = "tools" in kwargs_base
+    wants_stream = bool(kwargs_base.get("stream"))
+    kw_notool = {k: v for k, v in kwargs_base.items() if k not in ("tools", "tool_choice")}
+
+    async def _create_with_deadline(model_name: str, params: dict[str, Any]):
+        call_task = asyncio.create_task(client.chat.completions.create(model=model_name, **params))
+        cancel_task: Optional[asyncio.Task] = None
+        timeout_task: Optional[asyncio.Task] = None
         try:
-            resp = await client.chat.completions.create(model=m, **kwargs)
-            return resp, m, retries, errors
+            if cancel_event is not None:
+                cancel_task = asyncio.create_task(cancel_event.wait())
+            if req_timeout is not None:
+                timeout_task = asyncio.create_task(asyncio.sleep(req_timeout))
+
+            wait_set = {call_task}
+            if cancel_task is not None:
+                wait_set.add(cancel_task)
+            if timeout_task is not None:
+                wait_set.add(timeout_task)
+
+            if len(wait_set) == 1:
+                return await call_task
+
+            done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task is not None and cancel_task in done:
+                call_task.cancel()
+                raise asyncio.CancelledError("run cancelled by user")
+            if timeout_task is not None and timeout_task in done:
+                call_task.cancel()
+                raise TimeoutError(f"Request timed out after {req_timeout:.1f}s")
+            return await call_task
+        finally:
+            for t in (cancel_task, timeout_task):
+                if t is not None and not t.done():
+                    t.cancel()
+
+    def _format_exc(e: Exception) -> str:
+        try:
+            txt = str(e or "").strip()
+        except Exception:
+            txt = ""
+        if not txt:
+            try:
+                if getattr(e, "args", None):
+                    txt = " ".join(str(x) for x in e.args if str(x).strip()).strip()
+            except Exception:
+                txt = ""
+        name = type(e).__name__ if e is not None else "Error"
+        return f"{name}: {txt}" if txt else name
+
+    def _coerce_completion_like(resp: Any):
+        """
+        Accepts non-standard LLM response shapes (str/dict) and converts them
+        into an object compatible with downstream `resp.choices[0].message.content`.
+        """
+        if getattr(resp, "choices", None) is not None:
+            return resp
+
+        # Plain-text response
+        if isinstance(resp, str):
+            if not resp.strip():
+                return None
+            msg = SimpleNamespace(content=resp, tool_calls=None)
+            choice = SimpleNamespace(message=msg, finish_reason="stop")
+            return SimpleNamespace(choices=[choice])
+
+        # Dict-like response
+        if isinstance(resp, dict):
+            # Already OpenAI-like payload
+            if isinstance(resp.get("choices"), list):
+                try:
+                    choices = []
+                    for c in resp.get("choices") or []:
+                        mobj = c.get("message") if isinstance(c, dict) else {}
+                        msg = SimpleNamespace(
+                            content=(mobj.get("content", "") if isinstance(mobj, dict) else ""),
+                            tool_calls=(mobj.get("tool_calls") if isinstance(mobj, dict) else None),
+                        )
+                        choices.append(SimpleNamespace(message=msg, finish_reason=(c.get("finish_reason") if isinstance(c, dict) else "stop")))
+                    return SimpleNamespace(choices=choices)
+                except Exception:
+                    pass
+
+            # Minimal dict with "content"
+            if "content" in resp:
+                text = str(resp.get("content") or "")
+                if not text.strip():
+                    return None
+                msg = SimpleNamespace(content=text, tool_calls=None)
+                choice = SimpleNamespace(message=msg, finish_reason="stop")
+                return SimpleNamespace(choices=[choice])
+
+        return None
+
+    def _extract_msg_text(msg_obj: Any) -> str:
+        if msg_obj is None:
+            return ""
+        content = getattr(msg_obj, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    if item.strip():
+                        parts.append(item.strip())
+                    continue
+                if isinstance(item, dict):
+                    txt = str(item.get("text") or item.get("content") or "").strip()
+                    if txt:
+                        parts.append(txt)
+            return "\n".join(parts).strip()
+        return ""
+
+    async def _string_stream_adapter(text: str):
+        # Adapter for providers that may return plain text even when stream=True.
+        if text:
+            delta = SimpleNamespace(content=text)
+            choice = SimpleNamespace(delta=delta)
+            yield SimpleNamespace(choices=[choice])
+
+    async def _consume_stream_to_text(stream_obj: Any) -> str:
+        """
+        Best-effort adapter for providers returning stream objects even when
+        stream=False. Fold chunks into a single text answer.
+        """
+        out: list[str] = []
+        try:
+            if hasattr(stream_obj, "__aiter__"):
+                async for chunk in stream_obj:
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    c0 = choices[0]
+                    msg = getattr(c0, "message", None)
+                    if msg is not None:
+                        txt = getattr(msg, "content", None)
+                        if txt:
+                            out.append(str(txt))
+                            continue
+                    delta = getattr(c0, "delta", None)
+                    if delta is not None:
+                        txt = getattr(delta, "content", None)
+                        if txt:
+                            out.append(str(txt))
+            elif hasattr(stream_obj, "__iter__"):
+                for chunk in stream_obj:
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    c0 = choices[0]
+                    msg = getattr(c0, "message", None)
+                    if msg is not None:
+                        txt = getattr(msg, "content", None)
+                        if txt:
+                            out.append(str(txt))
+                            continue
+                    delta = getattr(c0, "delta", None)
+                    if delta is not None:
+                        txt = getattr(delta, "content", None)
+                        if txt:
+                            out.append(str(txt))
+        except Exception:
+            return ""
+        return "".join(out).strip()
+
+    def _coerce_stream_like(resp: Any):
+        # Standard OpenAI async stream object
+        if hasattr(resp, "__aiter__"):
+            return resp
+        # Fallback: some providers may return a plain string/dict even in stream mode.
+        if isinstance(resp, str):
+            if not resp.strip():
+                return None
+            return _string_stream_adapter(resp)
+        if isinstance(resp, dict):
+            if isinstance(resp.get("content"), str):
+                txt = str(resp.get("content") or "")
+                if not txt.strip():
+                    return None
+                return _string_stream_adapter(txt)
+            if isinstance(resp.get("text"), str):
+                txt = str(resp.get("text") or "")
+                if not txt.strip():
+                    return None
+                return _string_stream_adapter(txt)
+        return None
+
+    for m in model_chain:
+        # ── Attempt 1: original kwargs ────────────────────────────────────────
+        try:
+            resp = await _create_with_deadline(m, kwargs_base)
+            if not wants_stream and (hasattr(resp, "__aiter__") or hasattr(resp, "__iter__")):
+                txt_from_stream = await _consume_stream_to_text(resp)
+                if txt_from_stream:
+                    msg = SimpleNamespace(content=txt_from_stream, tool_calls=None)
+                    choice = SimpleNamespace(message=msg, finish_reason="stop")
+                    return SimpleNamespace(choices=[choice]), m, retries, errors
+            if wants_stream:
+                stream_like = _coerce_stream_like(resp)
+                if stream_like is not None:
+                    return stream_like, m, retries, errors
+                if not has_tools:
+                    errors.append(f"{m}: invalid stream shape ({type(resp).__name__})")
+                    retries += 1
+                    continue
+            coerced = _coerce_completion_like(resp)
+            if coerced is not None:
+                if not wants_stream:
+                    c = (getattr(coerced, "choices", None) or [])
+                    if c:
+                        m0 = getattr(c[0], "message", None)
+                        txt0 = _extract_msg_text(m0) if m0 else ""
+                        tc0 = getattr(m0, "tool_calls", None) if m0 else None
+                        if (not txt0) and (not tc0):
+                            if not has_tools:
+                                errors.append(f"{m}: empty completion")
+                                retries += 1
+                                continue
+                            # With tools enabled, fall through to retry same model without tools.
+                        else:
+                            return coerced, m, retries, errors
+                    else:
+                        if not has_tools:
+                            errors.append(f"{m}: empty completion")
+                            retries += 1
+                            continue
+                else:
+                    return coerced, m, retries, errors
+            # Bad shape but we have a tools fallback → fall through
+            if not has_tools:
+                errors.append(f"{m}: invalid response shape ({type(resp).__name__})")
+                retries += 1
+                continue
         except Exception as e:
-            errors.append(f"{m}: {e}")
+            if isinstance(e, asyncio.CancelledError):
+                raise
+            errors.append(f"{m}: {_format_exc(e)}")
             retries += 1
-            if idx >= len(model_chain) - 1:
-                break
+            continue
+
+        # ── Attempt 2: same model, no tools (only reached when tools caused bad shape)
+        try:
+            resp2 = await _create_with_deadline(m, kw_notool)
+            if not wants_stream and (hasattr(resp2, "__aiter__") or hasattr(resp2, "__iter__")):
+                txt2 = await _consume_stream_to_text(resp2)
+                if txt2:
+                    msg = SimpleNamespace(content=txt2, tool_calls=None)
+                    choice = SimpleNamespace(message=msg, finish_reason="stop")
+                    return SimpleNamespace(choices=[choice]), m, retries + 1, errors
+            if wants_stream:
+                stream_like2 = _coerce_stream_like(resp2)
+                if stream_like2 is not None:
+                    return stream_like2, m, retries + 1, errors
+            coerced2 = _coerce_completion_like(resp2)
+            if coerced2 is not None:
+                if not wants_stream:
+                    c2 = (getattr(coerced2, "choices", None) or [])
+                    if c2:
+                        m2 = getattr(c2[0], "message", None)
+                        txt2 = _extract_msg_text(m2) if m2 else ""
+                        tc2 = getattr(m2, "tool_calls", None) if m2 else None
+                        if (not txt2) and (not tc2):
+                            errors.append(f"{m}[notool]: empty completion")
+                            retries += 1
+                            continue
+                return coerced2, m, retries + 1, errors
+            errors.append(f"{m}[notool]: invalid shape ({type(resp2).__name__})")
+        except Exception as e2:
+            if isinstance(e2, asyncio.CancelledError):
+                raise
+            errors.append(f"{m}[notool]: {_format_exc(e2)}")
+        retries += 1
+
+    if (Config.LLM_PROVIDER or "").lower() == "llamacpp" and not _llamacpp_api_healthy(timeout=0.8):
+        raise RuntimeError(
+            f"llama.cpp API inválida/no disponible en {Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT} "
+            f"(posible conflicto de puerto)."
+        )
     raise RuntimeError(" | ".join(errors[:4]) or "llm call failed")
 
 
@@ -1145,11 +1759,14 @@ class ChatRequest(BaseModel):
     system_prompt: str = ""         # override default system prompt (from Behavior)
     model_override: str = ""        # optional behavior-level model override
     harness_override: str = ""      # optional behavior-level harness override
+    llamacpp_overrides: dict[str, Any] = Field(default_factory=dict)  # per-behavior llama runtime overrides
     folder_id: str = ""             # optional folder scope for folder-only docs
     sandbox_root: str = ""          # optional folder sandbox path (enforced for command/file ops)
     mode: str = "normal"            # normal | plan | iterate | simple
     conversation_id: str = ""
     dry_run: bool = False
+    internet_enabled: bool = True
+    tools_mode: str = "auto"        # auto | with_tools | without_tools
 
 
 class CommandActionRequest(BaseModel):
@@ -1318,7 +1935,9 @@ TOOLS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 _HIGH_RISK_PATTERNS = [
-    r"\bformat\b",
+    # Block dangerous disk format command, but avoid false-positives like URL params
+    # (e.g. auto=format in image URLs inside HTML/CSS content).
+    r"(?i)(?:^|[;&|]\s*|\s)format(?:\s+[a-z]:|\s+/|\s+fs=)",
     r"\bdiskpart\b",
     r"\bbcdedit\b",
     r"\bshutdown\b",
@@ -1393,7 +2012,11 @@ def _operation_class_for_command(command: str) -> str:
 
 
 def _policy_decision(operation_class: str, mutating: bool) -> tuple[str, str]:
-    default = "confirm" if mutating else "allow"
+    # Global execution mode should be the primary gate:
+    # - confirm => asks for approval
+    # - autonomous => runs directly
+    # Per-operation env policy can still force confirm/deny.
+    default = "allow"
     env_key = f"AGENT_POLICY_{operation_class.upper()}"
     raw = (os.getenv(env_key, default) or default).strip().lower()
     if raw not in ("allow", "confirm", "deny"):
@@ -1543,8 +2166,9 @@ def _run_windows_command(args: dict) -> str:
         _TOOL_RESULTS_BY_IDEMPOTENCY[idem_key] = result
         return result
 
-    # If no sandbox configured, force explicit user decision first.
-    if not sandbox_root and not approved:
+    # If no sandbox configured, force explicit user decision only in confirm mode.
+    # In autonomous mode, allow execution (unless blocked by explicit policy).
+    if not sandbox_root and not approved and _execution_mode() == "confirm":
         return json.dumps({
             "status": "needs_confirmation",
             "mode": _execution_mode(),
@@ -2004,7 +2628,7 @@ def _get_client():
 
 _PROMPTS = {
     "en": (
-        "You are an intelligent assistant for Universidad Nacional de Lomas de Zamora (UNLZ). "
+        "You are an intelligent local AI assistant. "
         "You have access to tools: local knowledge search (RAG), web search, time, system stats, and Windows terminal command execution. "
         "Do not claim you lack internet access. If the user asks to research/search online, you must call web_search. "
         "When the user asks you to perform an action on their machine, use run_windows_command instead of just explaining how. "
@@ -2013,7 +2637,7 @@ _PROMPTS = {
         "Format responses in Markdown. Be concise and precise."
     ),
     "es": (
-        "Eres un asistente inteligente de la Universidad Nacional de Lomas de Zamora (UNLZ). "
+        "Sos un asistente local de IA, generalista y neutral. "
         "Tenés acceso a herramientas: búsqueda de conocimiento local (RAG), búsqueda web, hora, stats del sistema y ejecución de comandos en terminal de Windows. "
         "No digas que no tenés acceso a internet: si el usuario pide investigar o buscar online, tenés que usar web_search. "
         "Cuando el usuario te pida realizar una acción en su máquina, usá run_windows_command en lugar de solo explicar pasos. "
@@ -2022,7 +2646,7 @@ _PROMPTS = {
         "Formateá las respuestas en Markdown. Sé conciso y preciso."
     ),
     "zh": (
-        "您是洛马斯·德萨莫拉国立大学的智能助手。"
+        "您是一个通用且中立的本地AI助手。"
         "您可以使用工具：本地知识搜索(RAG)、网络搜索、时间查询、系统状态。"
         "主动使用工具以准确回答。用Markdown格式化回答。简洁精确。"
     ),
@@ -2075,6 +2699,128 @@ def _compose_system_prompt(system_prompt: str = "", harness_override: str = "") 
             f"{system_prompt}"
         )
     return base_prompt
+
+
+def _simple_chat_system_prompt() -> str:
+    lang = (Config.AGENT_LANGUAGE or "es").strip().lower()
+    if lang == "es":
+        return (
+            "Sos un asistente conversacional. Respondé en español, breve y natural, "
+            "en 1-2 oraciones, sin usar herramientas."
+        )
+    if lang == "zh":
+        return "你是一个聊天助手。请简短自然地回答（1-2句），不要调用工具。"
+    return "You are a chat assistant. Reply briefly and naturally in 1-2 sentences. Do not call tools."
+
+
+def _simple_chat_extra_body(model_name: str) -> dict[str, Any]:
+    m = str(model_name or "").strip().lower()
+    # Qwen 3.6 supports enable_thinking kwarg; disabling it improves latency.
+    if "qwen3.6" in m or "qwen3-6" in m or "qwen-3.6" in m:
+        # llama.cpp expects this through chat_template_kwargs for Qwen 3.6 templates.
+        # Keep top-level flag as compatibility fallback for other backends/wrappers.
+        return {
+            "enable_thinking": False,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    return {}
+
+
+def _simple_chat_timeout_sec() -> int:
+    try:
+        v = int(str(os.getenv("SIMPLE_CHAT_TIMEOUT_SEC", "0")).strip())
+        if v <= 0:
+            return 0
+        return max(30, min(600, v))
+    except Exception:
+        return 0
+
+
+def _speed_router_model_chain(base_model: str = "") -> list[str]:
+    """
+    Candidate model chain for quick-vs-detailed routing.
+    Prefer a tiny model via env; always keep base/current model as fallback.
+    """
+    raw = str(os.getenv("AGENT_SPEED_ROUTER_MODELS", "") or "").strip()
+    if not raw:
+        raw = str(os.getenv("AGENT_SPEED_ROUTER_MODEL", "qwen3-0.6b,qwen3-1.7b,gemma-3-4b-it-q4_0") or "").strip()
+    candidates = [x.strip() for x in raw.split(",") if x.strip()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in [*candidates, str(base_model or "").strip()]:
+        mk = _model_chain_key(m)
+        if m and mk and mk not in seen:
+            seen.add(mk)
+            out.append(m)
+    return out
+
+
+async def _llm_route_response_depth(
+    message: str,
+    history: list[dict[str, Any]],
+    preferred_model: str,
+    cancel_event: Optional[asyncio.Event] = None,
+) -> tuple[str, str]:
+    """
+    LLM-based depth router.
+    Returns ("quick"|"detailed", reason).
+    """
+    client, base_model = _get_client()
+    chain = _speed_router_model_chain(preferred_model or base_model)
+    if not chain:
+        return "detailed", "speed_router_no_models"
+
+    recent = []
+    for h in history[-4:]:
+        role = str(h.get("role") or "").strip().lower()
+        content = str(h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            recent.append({"role": role, "content": content})
+
+    router_prompt = (
+        "Clasificá la consulta del usuario según profundidad de respuesta.\n"
+        "Respondé SOLO una palabra: QUICK o DETAILED.\n"
+        "QUICK: saludo, charla corta, ánimo, respuesta breve directa.\n"
+        "DETAILED: análisis, explicación profunda, investigación, planes, código, herramientas, múltiples pasos."
+    )
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": router_prompt}]
+    msgs.extend(recent)
+    msgs.append({"role": "user", "content": message})
+
+    resp, model_used, retries, _errors = await _chat_create_with_fallback(
+        client,
+        chain,
+        cancel_event=cancel_event,
+        messages=msgs,
+        stream=False,
+        max_tokens=8,
+        temperature=0.0,
+        top_p=1.0,
+        extra_body=_simple_chat_extra_body(chain[0]),
+    )
+    choices = getattr(resp, "choices", None) or []
+    if not choices:
+        return "detailed", f"speed_router_empty:{model_used}:r{retries}"
+    msg = getattr(choices[0], "message", None)
+    text = str(getattr(msg, "content", "") or "").strip().upper()
+    if "QUICK" in text:
+        return "quick", f"speed_router_llm:{model_used}:r{retries}"
+    return "detailed", f"speed_router_llm:{model_used}:r{retries}"
+
+
+def _format_runtime_error(e: Exception) -> str:
+    try:
+        txt = str(e or "").strip()
+    except Exception:
+        txt = ""
+    if not txt:
+        try:
+            if getattr(e, "args", None):
+                txt = " ".join(str(x) for x in e.args if str(x).strip()).strip()
+        except Exception:
+            txt = ""
+    name = type(e).__name__ if e is not None else "Error"
+    return f"{name}: {txt}" if txt else name
 
 
 def _extract_urls(text: str, limit: int = 8) -> list[str]:
@@ -2135,6 +2881,9 @@ async def _agent_stream_normal(
     conversation_id: str = "",
     dry_run: bool = False,
     simple_chat: bool = False,
+    internet_enabled: bool = True,
+    tools_mode: str = "auto",
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Multi-step tool-calling agent. Yields SSE data lines.
@@ -2148,18 +2897,33 @@ async def _agent_stream_normal(
         yield f"data: {json.dumps({'type': 'error', 'text': err})}\n\n"
         return
 
+    requested_tools_mode = str(tools_mode or "auto").strip().lower()
+    if requested_tools_mode not in ("auto", "with_tools", "without_tools"):
+        requested_tools_mode = "auto"
+
     client, model = _get_client()
     if simple_chat:
-        # Fast path: skip task router and model fallback chain.
+        # Fast path: skip task router and keep model chain short for low latency.
+        provider = (Config.LLM_PROVIDER or "").strip().lower()
+        preferred_model = str(model_override or "").strip()
+        smalltalk_model = str(os.getenv("AGENT_SMALLTALK_MODEL", "gemma-3-4b-it-q4_0")).strip()
+        # llama.cpp can serve only the currently loaded model efficiently.
+        # For simple chat, avoid cross-alias fallbacks that tend to timeout.
+        if provider == "llamacpp":
+            preferred_model = str(model or "").strip()
+        elif not preferred_model and smalltalk_model:
+            preferred_model = smalltalk_model
         task_area = "chat_general"
         route_conf = 1.0
         route_reason = "simple_mode"
+        primary_model = preferred_model or model
+        fallback_models = []
         route = {
-            "primary_model": model,
-            "fallback_models": [],
+            "primary_model": primary_model,
+            "fallback_models": fallback_models,
             "profile": "simple",
         }
-        model_chain = [model]
+        model_chain = _build_model_chain(model, route)
     else:
         task_area, route_conf, route_reason = _classify_task_area(message, mode="normal")
         route = _resolve_task_route(task_area)
@@ -2179,7 +2943,7 @@ async def _agent_stream_normal(
     if not simple_chat:
         yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
 
-    prompt_text = _compose_system_prompt(system_prompt, harness_override)
+    prompt_text = _simple_chat_system_prompt() if simple_chat else _compose_system_prompt(system_prompt, harness_override)
     messages: list[dict] = [{"role": "system", "content": prompt_text}]
     for h in history[-12:]:
         if h.get("role") in ("user", "assistant") and h.get("content"):
@@ -2204,29 +2968,45 @@ async def _agent_stream_normal(
     # Simple mode: answer directly with no tool-calling.
     if simple_chat:
         try:
-            stream, model_used, retries, _errors = await _chat_create_with_fallback(
+            timeout_fast = _simple_chat_timeout_sec()
+            fast_kwargs: dict[str, Any] = {
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 72,
+                "temperature": 0.6,
+                "top_p": 0.9,
+                "extra_body": _simple_chat_extra_body(model_chain[0] if model_chain else primary_model),
+            }
+            if timeout_fast > 0:
+                fast_kwargs["timeout"] = timeout_fast
+            resp_fast, model_used, retries, _errors = await _chat_create_with_fallback(
                 client,
                 model_chain,
-                messages=messages,
-                stream=True,
-                timeout=120,
+                cancel_event=cancel_event,
+                **fast_kwargs,
             )
             llm_retries_total += retries
             if retries > 0:
                 yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used, 'retries': retries}})}\n\n"
-            async for chunk in stream:
-                chunk_choices = getattr(chunk, "choices", None)
-                if not chunk_choices:
-                    continue
-                delta = getattr(chunk_choices[0], "delta", None)
-                delta_content = getattr(delta, "content", None) if delta else None
-                if delta_content:
-                    final_chunks.append(delta_content)
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': delta_content})}\n\n"
-                    await asyncio.sleep(0)
+            choices_fast = getattr(resp_fast, "choices", None) or []
+            if choices_fast:
+                msg_fast = getattr(choices_fast[0], "message", None)
+                txt_fast = str(getattr(msg_fast, "content", "") or "").strip()
+                if txt_fast:
+                    final_chunks.append(txt_fast)
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': txt_fast})}\n\n"
+            if not final_chunks:
+                errs = ""
+                if _errors:
+                    errs = " | " + " | ".join(str(x) for x in _errors[:2])
+                raise RuntimeError(f"No se recibió texto del modelo{errs}")
+        except asyncio.CancelledError:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'Simple chat error: {e}'})}\n\n"
-            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "simple", str(e))
+            err_txt = _format_runtime_error(e)
+            yield f"data: {json.dumps({'type': 'error', 'text': f'Simple chat error: {err_txt}'})}\n\n"
+            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "simple", err_txt)
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
@@ -2258,55 +3038,126 @@ async def _agent_stream_normal(
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
         return
 
-    # Fast-path for greetings/chit-chat: avoid unnecessary tool-calling latency.
-    if _is_smalltalk_request(message):
+    # Resolve tool policy from UI.
+    if requested_tools_mode == "without_tools":
         available_tools = []
         force_tools = False
+    elif requested_tools_mode == "with_tools":
+        available_tools = list(TOOLS)
     else:
         available_tools = _tools_for_message(message)
+
+    if not internet_enabled:
+        available_tools = [
+            t for t in available_tools
+            if t.get("function", {}).get("name") != "web_search"
+        ]
     if _safe_folder_id(folder_id):
         available_tools = [
             t for t in available_tools
             if t.get("function", {}).get("name") != "search_local_knowledge"
         ]
+    if requested_tools_mode != "auto":
+        yield f"data: {json.dumps({'type': 'step', 'text': 'tools.policy', 'args': {'mode': requested_tools_mode, 'internet_enabled': bool(internet_enabled), 'tools_available': [t.get('function', {}).get('name') for t in available_tools]}})}\n\n"
 
     loop = asyncio.get_event_loop()
-    invalid_shape_count = 0
     emitted_final = False
+    normal_timeout = _normal_chat_timeout_sec()
+
+    def _raise_if_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError("run cancelled by user")
 
     for iteration in range(limits["max_iterations"]):
+        _raise_if_cancelled()
         if (time.time() - started_at) >= limits["max_wall_sec"]:
             yield f"data: {json.dumps({'type': 'error', 'text': 'Agent wall-time limit reached before completion.'})}\n\n"
             break
 
         try:
+            _extra: dict = {}
+            if available_tools:
+                _extra["tools"] = available_tools
+                # "required" breaks many llama.cpp builds — use "auto" always.
+                # The fallback logic in _chat_create_with_fallback will retry
+                # without tools if the model can't handle them.
+                _extra["tool_choice"] = "auto"
+            req_kwargs: dict[str, Any] = {"messages": messages, "stream": False, **_extra}
+            if normal_timeout is not None:
+                req_kwargs["timeout"] = normal_timeout
             resp, model_used, retries, _errors = await _chat_create_with_fallback(
                 client,
                 model_chain,
-                messages=messages,
-                tools=available_tools,
-                tool_choice="required" if (force_tools and iteration == 0) else "auto",
-                stream=False,
-                timeout=90,
+                cancel_event=cancel_event,
+                **req_kwargs,
             )
             llm_retries_total += retries
             if retries > 0:
                 yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used, 'retries': retries}})}\n\n"
+        except asyncio.CancelledError:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
         except Exception as e2:
-            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM error: {e2}'})}\n\n"
-            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "normal", str(e2))
+            err_txt = _format_runtime_error(e2)
+            lower_err = err_txt.lower()
+            is_timeout = isinstance(e2, TimeoutError) or ("timeout" in lower_err) or ("timed out" in lower_err)
+            # If normal route timed out, try one last quick simple-chat fallback
+            # so casual queries do not end as hard errors.
+            if is_timeout and requested_tools_mode != "with_tools":
+                try:
+                    quick_messages: list[dict] = [{"role": "system", "content": _simple_chat_system_prompt()}]
+                    for h in history[-8:]:
+                        if h.get("role") in ("user", "assistant") and h.get("content"):
+                            quick_messages.append({"role": h["role"], "content": h["content"]})
+                    quick_messages.append({"role": "user", "content": message})
+                    quick_timeout = _simple_chat_timeout_sec()
+                    quick_kwargs: dict[str, Any] = {
+                        "messages": quick_messages,
+                        "stream": False,
+                        "max_tokens": 96,
+                        "temperature": 0.7,
+                        "top_p": 0.9,
+                        "extra_body": _simple_chat_extra_body(model_chain[0] if model_chain else model),
+                    }
+                    if quick_timeout > 0:
+                        quick_kwargs["timeout"] = max(8, min(quick_timeout, 25))
+                    resp_quick, model_used_quick, retries_quick, _errors_quick = await _chat_create_with_fallback(
+                        client,
+                        model_chain,
+                        cancel_event=cancel_event,
+                        **quick_kwargs,
+                    )
+                    llm_retries_total += retries_quick
+                    if retries_quick > 0:
+                        yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used_quick, 'retries': retries_quick}})}\n\n"
+                    choices_quick = getattr(resp_quick, "choices", None) or []
+                    if choices_quick:
+                        msg_quick = getattr(choices_quick[0], "message", None)
+                        txt_quick = str(getattr(msg_quick, "content", "") or "").strip()
+                        if txt_quick:
+                            final_chunks.append(txt_quick)
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': txt_quick})}\n\n"
+                            confidence = _confidence_from_context(
+                                tool_calls=tool_calls,
+                                had_errors=had_tool_errors,
+                                research_request=is_research,
+                                answer_text=txt_quick,
+                                web_result_text=(last_tool_result or ""),
+                            )
+                            yield f"data: {json.dumps({'type': 'confidence', 'score': confidence, 'tool_calls': int(tool_calls)})}\n\n"
+                            _record_router_metric(task_area, model_used_quick, True, int((time.time() - started_at) * 1000), llm_retries_total, "normal", f"{route_reason}|timeout_fallback_simple")
+                            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                            return
+                except Exception:
+                    pass
+            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM error: {err_txt}'})}\n\n"
+            _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "normal", err_txt)
             return
 
         choices = getattr(resp, "choices", None)
+        # _chat_create_with_fallback guarantees choices is not None, but be safe.
         if choices is None:
-            invalid_shape_count += 1
-            if invalid_shape_count <= 2:
-                await asyncio.sleep(0.8)
-                continue
-            preview = str(resp)
-            if len(preview) > 240:
-                preview = preview[:240] + "..."
-            yield f"data: {json.dumps({'type': 'error', 'text': f'LLM invalid response shape: {type(resp).__name__} {preview}'})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'text': 'LLM returned no choices after all fallbacks'})}\n\n"
             return
         if not choices:
             yield f"data: {json.dumps({'type': 'error', 'text': 'LLM returned empty choices'})}\n\n"
@@ -2316,6 +3167,40 @@ async def _agent_stream_normal(
         msg = getattr(choice, "message", None)
         finish_reason = getattr(choice, "finish_reason", None)
         msg_tool_calls = getattr(msg, "tool_calls", None) if msg else None
+
+        # Direct answer path: when the model responded without tool calls,
+        # use that response immediately and avoid a second streaming request.
+        if not msg_tool_calls:
+            direct_text = str(getattr(msg, "content", "") or "").strip()
+            if not direct_text:
+                try:
+                    recovery_messages = messages + [{
+                        "role": "system",
+                        "content": "Respondé ahora en texto plano, breve y en el mismo idioma del usuario. No uses herramientas.",
+                    }]
+                    fill_kwargs: dict[str, Any] = {"messages": recovery_messages, "stream": False}
+                    if normal_timeout is not None:
+                        fill_kwargs["timeout"] = max(10, min(normal_timeout, 30))
+                    resp_fill, model_used_fill, retries_fill, _errors_fill = await _chat_create_with_fallback(
+                        client,
+                        model_chain,
+                        cancel_event=cancel_event,
+                        **fill_kwargs,
+                    )
+                    llm_retries_total += retries_fill
+                    if retries_fill > 0:
+                        yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used_fill, 'retries': retries_fill}})}\n\n"
+                    choices_fill = getattr(resp_fill, "choices", None) or []
+                    if choices_fill:
+                        msg_fill = getattr(choices_fill[0], "message", None)
+                        direct_text = str(getattr(msg_fill, "content", "") or "").strip()
+                except Exception:
+                    direct_text = ""
+            if direct_text:
+                final_chunks.append(direct_text)
+                yield f"data: {json.dumps({'type': 'chunk', 'text': direct_text})}\n\n"
+                emitted_final = True
+                break
 
         if finish_reason == "tool_calls" and msg_tool_calls:
             messages.append({
@@ -2392,6 +3277,7 @@ async def _agent_stream_normal(
             stream, model_used, retries, _errors = await _chat_create_with_fallback(
                 client,
                 model_chain,
+                cancel_event=cancel_event,
                 messages=messages,
                 stream=True,
                 timeout=120,
@@ -2406,6 +3292,7 @@ async def _agent_stream_normal(
             break
         try:
             async for chunk in stream:
+                _raise_if_cancelled()
                 chunk_choices = getattr(chunk, "choices", None)
                 if not chunk_choices:
                     continue
@@ -2422,9 +3309,65 @@ async def _agent_stream_normal(
                     final_chunks.append(summary)
                     yield f"data: {json.dumps({'type': 'chunk', 'text': summary})}\n\n"
                 else:
-                    txt = "No pude ejecutar la accion automaticamente. Reintenta o reformula con mas detalle."
-                    final_chunks.append(txt)
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': txt})}\n\n"
+                    # Some providers/models return an empty stream; retry once as non-stream.
+                    recovered = ""
+                    try:
+                        resp_ns, model_used_ns, retries_ns, _errors_ns = await _chat_create_with_fallback(
+                            client,
+                            model_chain,
+                            cancel_event=cancel_event,
+                            messages=messages,
+                            stream=False,
+                            timeout=120,
+                        )
+                        llm_retries_total += retries_ns
+                        if retries_ns > 0:
+                            yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used_ns, 'retries': retries_ns}})}\n\n"
+                        choices_ns = getattr(resp_ns, "choices", None) or []
+                        if choices_ns:
+                            msg_ns = getattr(choices_ns[0], "message", None)
+                            recovered = str(getattr(msg_ns, "content", "") or "").strip()
+                    except Exception:
+                        recovered = ""
+
+                    if recovered:
+                        final_chunks.append(recovered)
+                        yield f"data: {json.dumps({'type': 'chunk', 'text': recovered})}\n\n"
+                    else:
+                        # Second recovery attempt forcing plain text and no tools.
+                        recovered2 = ""
+                        try:
+                            recovery_messages2 = messages + [{
+                                "role": "system",
+                                "content": "Respondé en texto plano, breve y útil. No llames herramientas.",
+                            }]
+                            resp_ns2, model_used_ns2, retries_ns2, _errors_ns2 = await _chat_create_with_fallback(
+                                client,
+                                model_chain,
+                                cancel_event=cancel_event,
+                                messages=recovery_messages2,
+                                stream=False,
+                                timeout=90,
+                            )
+                            llm_retries_total += retries_ns2
+                            if retries_ns2 > 0:
+                                yield f"data: {json.dumps({'type': 'step', 'text': 'task_router.llm_fallback', 'args': {'used_model': model_used_ns2, 'retries': retries_ns2}})}\n\n"
+                            choices_ns2 = getattr(resp_ns2, "choices", None) or []
+                            if choices_ns2:
+                                msg_ns2 = getattr(choices_ns2[0], "message", None)
+                                recovered2 = str(getattr(msg_ns2, "content", "") or "").strip()
+                        except Exception:
+                            recovered2 = ""
+                        if recovered2:
+                            final_chunks.append(recovered2)
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': recovered2})}\n\n"
+                        else:
+                            txt = "El modelo no devolvió texto en este intento. Reintentá."
+                            final_chunks.append(txt)
+                            yield f"data: {json.dumps({'type': 'chunk', 'text': txt})}\n\n"
+        except asyncio.CancelledError:
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
         except Exception as e:
             had_tool_errors = True
             yield f"data: {json.dumps({'type': 'error', 'text': f'Stream error: {e}'})}\n\n"
@@ -2488,12 +3431,24 @@ async def _run_internal_agent_once(
     sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> dict:
     text_chunks: list[str] = []
     steps: list[dict] = []
     error_text = ""
     confidence = None
-    async for raw in _agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run):
+    async for raw in _agent_stream_normal(
+        message,
+        history,
+        system_prompt,
+        model_override,
+        harness_override,
+        folder_id,
+        sandbox_root,
+        conversation_id,
+        dry_run,
+        cancel_event=cancel_event,
+    ):
         if not raw.startswith("data: "):
             continue
         payload = raw[6:].strip()
@@ -2537,12 +3492,100 @@ def _extract_json_object(text: str) -> dict:
         return {}
 
 
+def _plan_markdown_from_json(plan: dict) -> str:
+    """
+    Renderiza salida de modo plan en formato secuencial (una pregunta por turno).
+    Formato esperado (recomendado):
+    {
+      "phase": "question" | "final",
+      "stage": {
+        "name": "...",
+        "goal": "...",
+        "alternatives": [{"title":"...","tradeoff":"..."}],
+        "question": "..."
+      },
+      "final": {
+        "summary": "...",
+        "question": "¿Querés ejecutar el plan, editarlo o descartarlo?"
+      }
+    }
+    """
+    phase = str(plan.get("phase") or "").strip().lower()
+    out: list[str] = []
+
+    if phase == "final":
+        final = plan.get("final") if isinstance(plan.get("final"), dict) else {}
+        summary = str(final.get("summary") or plan.get("summary") or "").strip()
+        question = str(final.get("question") or plan.get("final_question") or "").strip()
+        out.append("## Plan consolidado")
+        if summary:
+            out.append(summary)
+            out.append("")
+        out.append(question or "¿Querés ejecutar el plan, editarlo o descartarlo?")
+        return "\n".join(out).strip()
+
+    stage = plan.get("stage") if isinstance(plan.get("stage"), dict) else {}
+    name = str(stage.get("name") or plan.get("stage_name") or "Siguiente decisión").strip()
+    goal = str(stage.get("goal") or plan.get("goal") or "").strip()
+    alts = stage.get("alternatives")
+    if not isinstance(alts, list):
+        alts = plan.get("alternatives") if isinstance(plan.get("alternatives"), list) else []
+    question = str(stage.get("question") or plan.get("question") or "").strip()
+
+    out.append("## Plan propuesto")
+    out.append(f"### {name}")
+    if goal:
+        out.append(f"- Objetivo: {goal}")
+    if alts:
+        out.append("- Alternativas:")
+        for j, a in enumerate(alts, 1):
+            if isinstance(a, dict):
+                title = str(a.get("title") or f"Opción {j}").strip()
+                tradeoff = str(a.get("tradeoff") or "").strip()
+            else:
+                title = str(a).strip() or f"Opción {j}"
+                tradeoff = ""
+            out.append(f"  - {j}. {title}" + (f" — {tradeoff}" if tradeoff else ""))
+    out.append(f"- Decisión requerida: {question or '¿Qué opción elegís para continuar?'}")
+    return "\n".join(out).strip()
+
+
+def _plan_text_has_options(text: str) -> bool:
+    t = (text or "").lower()
+    has_consolidated = "plan consolidado" in t
+    has_final = "ejecutar el plan" in t and "editar el plan" in t and "descartar" in t
+    has_opts = ("alternativa" in t) or ("opción" in t) or ("opcion" in t)
+    has_decision = ("decisión" in t) or ("decision" in t) or ("eleg" in t) or ("pregunta" in t)
+    return has_consolidated or has_final or (has_opts and has_decision)
+
+
+def _count_plan_decisions(history: list[dict], current_message: str = "") -> int:
+    """
+    Cuenta decisiones ya tomadas en modo plan a partir de mensajes de usuario.
+    """
+    patt = re.compile(
+        r"(elijo esta alternativa|elijo|opción elegida|opcion elegida|otra:|mi elección|mi eleccion)",
+        re.IGNORECASE,
+    )
+    n = 0
+    for h in history:
+        if str(h.get("role") or "") != "user":
+            continue
+        content = str(h.get("content") or "")
+        if patt.search(content):
+            n += 1
+    if patt.search(current_message or ""):
+        n += 1
+    return n
+
+
 async def _plan_stream(
     message: str,
     history: list[dict],
     system_prompt: str = "",
     model_override: str = "",
     harness_override: str = "",
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncGenerator[str, None]:
     from guardrails.validator import validate_input
     safety = validate_input(message)
@@ -2560,19 +3603,42 @@ async def _plan_stream(
     model_chain = _build_model_chain(model, route)
     model_used = model_chain[0]
     llm_retries_total = 0
+    decision_count = _count_plan_decisions(history, message)
+    max_plan_decisions = 3
+    force_final = decision_count >= max_plan_decisions
     yield f"data: {json.dumps({'type': 'step', 'text': 'task_router', 'args': {'area': task_area, 'confidence': route_conf, 'reason': route_reason, 'primary_model': route.get('primary_model'), 'fallback_models': route.get('fallback_models'), 'profile': route.get('profile')}})}\n\n"
     plan_protocol = (
-        "Modo plan activo. Tu tarea es planificar antes de ejecutar.\n"
+        "Modo plan activo. Debés planificar de forma secuencial y pedir decisiones del usuario.\n"
+        "No ejecutes herramientas.\n"
+        "IMPORTANTE: hacé UNA sola pregunta por respuesta.\n"
+        "Leé el historial para saber qué decisiones ya tomó el usuario y avanzá a la siguiente etapa.\n"
+        "Si todavía faltan decisiones, devolvé solo la etapa actual en JSON puro:\n"
+        "{\n"
+        "  \"phase\": \"question\",\n"
+        "  \"stage\": {\n"
+        "    \"name\": \"...\",\n"
+        "    \"goal\": \"...\",\n"
+        "    \"alternatives\": [\n"
+        "      {\"title\": \"...\", \"tradeoff\": \"...\"},\n"
+        "      {\"title\": \"...\", \"tradeoff\": \"...\"}\n"
+        "    ],\n"
+        "    \"question\": \"...\"\n"
+        "  }\n"
+        "}\n"
+        "Cuando ya tengas todas las decisiones del usuario, devolvé solo el cierre en JSON puro:\n"
+        "{\n"
+        "  \"phase\": \"final\",\n"
+        "  \"final\": {\n"
+        "    \"summary\": \"...\",\n"
+        "    \"question\": \"¿Querés ejecutar el plan, editarlo o descartarlo?\"\n"
+        "  }\n"
+        "}\n"
         "Reglas:\n"
-        "1) Presentá el plan por etapas numeradas.\n"
-        "2) En cada etapa, ofrecé 2-4 alternativas con trade-offs.\n"
-        "3) Pedí la decisión del usuario antes de pasar a la siguiente etapa.\n"
-        "4) Cuando tengas decisiones suficientes, emití 'PLAN FINAL' con todas las decisiones tomadas.\n"
-        "5) Terminá con una pregunta explícita con estas opciones:\n"
-        "   - Ejecutar el plan (modo agente iterador)\n"
-        "   - Editar el plan\n"
-        "   - Descartar\n"
-        "No ejecutes herramientas en modo plan, solo planificación."
+        "- En phase=question incluí 2 a 4 alternativas.\n"
+        "- No incluyas todas las etapas juntas.\n"
+        "- No agregues listas finales de acciones en texto fuera de question.\n"
+        f"- Ya hay {decision_count} decisiones tomadas. Si hay {max_plan_decisions} o más, devolvé phase=final.\n"
+        "- Si ya hay 2 o más decisiones, preferí cerrar con phase=final salvo que falte un dato crítico."
     )
     final_system = f"{_compose_system_prompt(system_prompt, harness_override)}\n\n{plan_protocol}"
     messages: list[dict] = [{"role": "system", "content": final_system}]
@@ -2582,24 +3648,97 @@ async def _plan_stream(
     messages.append({"role": "user", "content": message})
 
     try:
-        stream, model_used, retries, _errors = await _chat_create_with_fallback(
+        plan_text = ""
+        resp, model_used, retries, _errors = await _chat_create_with_fallback(
             client,
             model_chain,
+            cancel_event=cancel_event,
             messages=messages,
-            stream=True,
-            timeout=120,
+            stream=False,
+            timeout=60,
         )
         llm_retries_total += retries
-        async for chunk in stream:
-            ch = getattr(chunk, "choices", None)
-            if not ch:
-                continue
-            delta = getattr(ch[0], "delta", None)
-            txt = getattr(delta, "content", None) if delta else None
-            if txt:
-                yield f"data: {json.dumps({'type': 'chunk', 'text': txt})}\n\n"
-                await asyncio.sleep(0)
+        content = getattr(getattr(resp.choices[0], "message", None), "content", "") if getattr(resp, "choices", None) else ""
+        plan_json = _extract_json_object(content)
+        if plan_json and isinstance(plan_json, dict):
+            plan_text = _plan_markdown_from_json(plan_json)
+        else:
+            plan_text = str(content or "").strip()
+
+        phase = str(plan_json.get("phase") if isinstance(plan_json, dict) else "").strip().lower()
+        if force_final and phase != "final":
+            strict_final_messages = messages + [{
+                "role": "user",
+                "content": (
+                    "Cierre obligatorio: ya se tomaron suficientes decisiones.\n"
+                    "Respondé SOLO con JSON válido y phase=final.\n"
+                    "No hagas más preguntas de etapa."
+                ),
+            }]
+            resp_final, model_used_final, retries_final, _errors_final = await _chat_create_with_fallback(
+                client,
+                model_chain,
+                cancel_event=cancel_event,
+                messages=strict_final_messages,
+                stream=False,
+                timeout=60,
+            )
+            model_used = model_used_final or model_used
+            llm_retries_total += retries_final
+            content_final = getattr(getattr(resp_final.choices[0], "message", None), "content", "") if getattr(resp_final, "choices", None) else ""
+            plan_json_final = _extract_json_object(content_final)
+            if plan_json_final and isinstance(plan_json_final, dict):
+                plan_text = _plan_markdown_from_json(plan_json_final)
+            else:
+                plan_text = str(content_final or plan_text).strip()
+
+        if not _plan_text_has_options(plan_text):
+            strict_messages = messages + [{
+                "role": "user",
+                "content": (
+                    "Rehacelo en formato secuencial de modo plan.\n"
+                    "Debe haber UNA sola pregunta en esta respuesta.\n"
+                    "Devolvé JSON válido con phase=question o phase=final."
+                ),
+            }]
+            resp2, model_used2, retries2, _errors2 = await _chat_create_with_fallback(
+                client,
+                model_chain,
+                cancel_event=cancel_event,
+                messages=strict_messages,
+                stream=False,
+                timeout=60,
+            )
+            model_used = model_used2 or model_used
+            llm_retries_total += retries2
+            content2 = getattr(getattr(resp2.choices[0], "message", None), "content", "") if getattr(resp2, "choices", None) else ""
+            plan_json2 = _extract_json_object(content2)
+            if plan_json2 and isinstance(plan_json2, dict):
+                plan_text = _plan_markdown_from_json(plan_json2)
+            else:
+                plan_text = str(content2 or plan_text).strip()
+
+        if not _plan_text_has_options(plan_text):
+            plan_text = (
+                "## Plan consolidado\n\n"
+                "Ya tenemos decisiones suficientes para cerrar esta planificación.\n\n"
+                "¿Querés ejecutar el plan, editarlo o descartarlo?"
+                if force_final
+                else
+                "## Plan propuesto\n\n"
+                "### Siguiente decisión\n"
+                "- Alternativas:\n"
+                "  - 1. Enfoque rápido — menor detalle, salida inmediata.\n"
+                "  - 2. Enfoque equilibrado — equilibrio entre calidad y tiempo.\n"
+                "  - 3. Enfoque profundo — más variantes y comparación detallada.\n"
+                "- Decisión requerida: ¿Cuál alternativa elegís para avanzar?"
+            )
+
+        yield f"data: {json.dumps({'type': 'chunk', 'text': plan_text})}\n\n"
     except Exception as e:
+        if isinstance(e, asyncio.CancelledError):
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
         yield f"data: {json.dumps({'type': 'error', 'text': f'Plan mode error: {e}'})}\n\n"
         _record_router_metric(task_area, model_used, False, int((time.time() - started_at) * 1000), llm_retries_total, "plan", str(e))
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -2619,6 +3758,7 @@ async def _iterate_stream(
     sandbox_root: str = "",
     conversation_id: str = "",
     dry_run: bool = False,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncGenerator[str, None]:
     from guardrails.validator import validate_input
 
@@ -2632,6 +3772,27 @@ async def _iterate_stream(
     started_at = time.time()
     client, model = _get_client()
     task_area, route_conf, route_reason = _classify_task_area(message, mode="iterate")
+
+    # Fast-path: iterative execution is useful for actionable tasks.
+    # For plain conversational prompts, bypass iterator planning/execution
+    # and answer directly to avoid unnecessary latency and "Plan de ejecucion" noise.
+    if task_area == "chat_general":
+        async for ev in _agent_stream_normal(
+            message,
+            history,
+            system_prompt,
+            model_override,
+            harness_override,
+            folder_id,
+            sandbox_root,
+            conversation_id,
+            dry_run,
+            simple_chat=True,
+            cancel_event=cancel_event,
+        ):
+            yield ev
+        return
+
     route = _resolve_task_route(task_area)
     route = _route_with_model_override(route, model_override)
     model_chain = _build_model_chain(model, route)
@@ -2652,6 +3813,7 @@ async def _iterate_stream(
         plan_resp, model_used, retries, _errors = await _chat_create_with_fallback(
             client,
             model_chain,
+            cancel_event=cancel_event,
             messages=planning_messages,
             stream=False,
             timeout=60,
@@ -2694,9 +3856,12 @@ async def _iterate_stream(
     yield f"data: {json.dumps({'type': 'chunk', 'text': '\\n'.join(plan_md) + '\\n\\n'})}\n\n"
 
     exec_history = history[-10:]
-    max_retries = 3
+    max_retries = max(1, min(int(os.getenv("AGENT_ITERATOR_STAGE_RETRIES", "2")), 4))
     done: dict[str, dict] = {}
     pending = list(stages)
+    # Use a lighter validator chain to reduce per-stage latency.
+    validate_route = _resolve_task_route("chat_general")
+    validate_chain = _build_model_chain(model, validate_route)
 
     async def execute_stage(stage: dict, idx: int) -> tuple[bool, str, str, list[str]]:
         stage_name = stage.get("name", "")
@@ -2711,7 +3876,18 @@ async def _iterate_stream(
                 f"Meta de etapa: {stage_goal}\\n"
                 f"Intento {attempt}/{max_retries}. Ejecuta las acciones necesarias usando herramientas y reporta resultado."
             )
-            result = await _run_internal_agent_once(stage_prompt, exec_history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)
+            result = await _run_internal_agent_once(
+                stage_prompt,
+                exec_history,
+                system_prompt,
+                model_override,
+                harness_override,
+                folder_id,
+                sandbox_root,
+                conversation_id,
+                dry_run,
+                cancel_event=cancel_event,
+            )
             last_output = result.get("text") or result.get("error") or ""
             if result.get("error"):
                 logs.append(f"Intento {attempt}: error -> {result['error']}\n")
@@ -2730,10 +3906,11 @@ async def _iterate_stream(
             try:
                 val_resp, model_used, retries, _errors = await _chat_create_with_fallback(
                     client,
-                    model_chain,
+                    validate_chain,
+                    cancel_event=cancel_event,
                     messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": validate_prompt}],
                     stream=False,
-                    timeout=40,
+                    timeout=20,
                 )
                 llm_retries_total += retries
                 val_content = getattr(getattr(val_resp.choices[0], "message", None), "content", "") if getattr(val_resp, "choices", None) else ""
@@ -2762,9 +3939,15 @@ async def _iterate_stream(
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 
-        parallel_batch = [s for s in ready if s.get("parallelizable")]
-        serial_batch = [s for s in ready if not s.get("parallelizable")]
-        batch = parallel_batch if parallel_batch else serial_batch[:1]
+        # By default run serially to keep artifact ordering coherent.
+        # Can be switched back with AGENT_ITERATOR_PARALLEL=true.
+        allow_parallel = (os.getenv("AGENT_ITERATOR_PARALLEL", "false") or "false").strip().lower() in ("1", "true", "yes")
+        if allow_parallel:
+            parallel_batch = [s for s in ready if s.get("parallelizable")]
+            serial_batch = [s for s in ready if not s.get("parallelizable")]
+            batch = parallel_batch if parallel_batch else serial_batch[:1]
+        else:
+            batch = ready[:1]
 
         tasks = []
         for s in batch:
@@ -2820,13 +4003,21 @@ async def _agent_stream(
     system_prompt: str = "",
     model_override: str = "",
     harness_override: str = "",
+    llamacpp_overrides: Optional[dict[str, Any]] = None,
     folder_id: str = "",
     sandbox_root: str = "",
     mode: str = "normal",
     conversation_id: str = "",
     dry_run: bool = False,
+    internet_enabled: bool = True,
+    tools_mode: str = "auto",
 ) -> AsyncGenerator[str, None]:
     run_id = uuid.uuid4().hex[:12]
+    cancel_event = _register_run_cancel(run_id)
+    run_started_perf = time.perf_counter()
+    run_started_ms = int(time.time() * 1000)
+    phase_starts: dict[str, float] = {}
+    phase_durations: dict[str, int] = {}
     trace: dict[str, Any] = {
         "run_id": run_id,
         "conversation_id": conversation_id,
@@ -2834,23 +4025,123 @@ async def _agent_stream(
         "sandbox_root": sandbox_root,
         "mode": (mode or "normal").strip().lower(),
         "started_at": datetime.now().isoformat(timespec="seconds"),
+        "started_at_ms": run_started_ms,
         "input": {"message": message, "history_size": len(history)},
+        "internet_enabled": bool(internet_enabled),
+        "tools_mode": str(tools_mode or "auto"),
+        "timing": {},
         "events": [],
     }
 
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
+
+    def _elapsed_ms() -> int:
+        return int((time.perf_counter() - run_started_perf) * 1000)
+
+    def _trace_event(ev: dict[str, Any]) -> None:
+        item = dict(ev or {})
+        item.setdefault("ts_ms", _now_ms())
+        item.setdefault("dt_ms_from_start", _elapsed_ms())
+        trace["events"].append(item)
+        _devlog_emit_trace({
+            "run_id": run_id,
+            "conversation_id": conversation_id,
+            **item,
+        })
+
+    def _phase_start(name: str, args: Optional[dict[str, Any]] = None) -> None:
+        if name in phase_starts:
+            return
+        phase_starts[name] = time.perf_counter()
+        _trace_event({
+            "type": "phase.start",
+            "text": name,
+            "args": args or {},
+        })
+
+    def _phase_end(name: str, args: Optional[dict[str, Any]] = None) -> None:
+        started = phase_starts.pop(name, None)
+        duration_ms: Optional[int] = None
+        if started is not None:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            phase_durations[f"{name}_ms"] = duration_ms
+        payload: dict[str, Any] = {
+            "type": "phase.end",
+            "text": name,
+            "args": args or {},
+        }
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        _trace_event(payload)
+
     async def _stream_and_trace(inner: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
+        router_phase_open = False
+        llm_phase_open = False
+        first_chunk_recorded = False
         try:
             async for ev in inner:
                 if ev.startswith("data: "):
                     payload = ev[6:].strip()
                     if payload:
                         try:
-                            trace["events"].append(json.loads(payload))
+                            parsed = json.loads(payload)
+                            if isinstance(parsed, dict):
+                                ev_type = str(parsed.get("type") or "")
+                                ev_text = str(parsed.get("text") or "")
+                                ev_args = parsed.get("args")
+                                if ev_type == "step" and ev_text == "task_router":
+                                    if not router_phase_open:
+                                        _phase_start("router", ev_args if isinstance(ev_args, dict) else {})
+                                        router_phase_open = True
+                                elif ev_type == "chunk":
+                                    chunk_text = str(parsed.get("text") or "")
+                                    if not llm_phase_open:
+                                        if router_phase_open:
+                                            _phase_end("router", {"reason": "first_chunk"})
+                                            router_phase_open = False
+                                        _phase_start("llm_call")
+                                        llm_phase_open = True
+                                    if chunk_text.strip() and not first_chunk_recorded:
+                                        first_chunk_recorded = True
+                                        ttft = _elapsed_ms()
+                                        trace["timing"]["ttft_ms"] = ttft
+                                        _trace_event({
+                                            "type": "phase.mark",
+                                            "text": "first_token",
+                                            "args": {"ttft_ms": ttft},
+                                        })
+                                elif ev_type == "error":
+                                    if router_phase_open:
+                                        _phase_end("router", {"reason": "error"})
+                                        router_phase_open = False
+                                    if llm_phase_open:
+                                        _phase_end("llm_call", {"reason": "error"})
+                                        llm_phase_open = False
+                                elif ev_type == "done":
+                                    if router_phase_open:
+                                        _phase_end("router", {"reason": "done"})
+                                        router_phase_open = False
+                                    if llm_phase_open:
+                                        _phase_end("llm_call", {"reason": "done"})
+                                        llm_phase_open = False
+                                _trace_event(parsed)
+                            else:
+                                _trace_event({"type": "raw", "payload": str(parsed)[:800]})
                         except Exception:
-                            trace["events"].append({"type": "raw", "payload": payload[:800]})
+                            _trace_event({"type": "raw", "payload": payload[:800]})
                 yield ev
         finally:
+            # Close any lingering phases on abrupt stream termination.
+            if "router" in phase_starts:
+                _phase_end("router", {"reason": "stream_end"})
+            if "llm_call" in phase_starts:
+                _phase_end("llm_call", {"reason": "stream_end"})
             trace["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            trace["finished_at_ms"] = _now_ms()
+            trace["timing"]["total_ms"] = _elapsed_ms()
+            for k, v in phase_durations.items():
+                trace["timing"][k] = v
             _persist_trace(run_id, trace)
             _emit_telemetry("run_completed", {
                 "run_id": run_id,
@@ -2859,23 +4150,107 @@ async def _agent_stream(
                 "event_count": len(trace.get("events") or []),
             })
 
+    _trace_event({"type": "run", "run_id": run_id, "text": "run_start", "args": {"mode_requested": trace.get("mode")}})
     yield f"data: {json.dumps({'type': 'run', 'run_id': run_id})}\n\n"
 
-    m = (mode or "normal").strip().lower()
-    if m == "plan":
-        async for ev in _stream_and_trace(_plan_stream(message, history, system_prompt, model_override, harness_override)):
+    try:
+        m = (mode or "normal").strip().lower()
+        requested_tools_mode = str(tools_mode or "auto").strip().lower()
+        if requested_tools_mode not in ("auto", "with_tools", "without_tools"):
+            requested_tools_mode = "auto"
+        depth_route = "detailed"
+        depth_reason = "depth_router_default"
+        # Compute effective path first.
+        # In normal mode we delegate quick-vs-detailed routing to a tiny LLM router.
+        effective_simple = (m == "simple")
+        if m == "normal" and requested_tools_mode != "with_tools":
+            _phase_start("depth_router")
+            try:
+                depth_route, depth_reason = await _llm_route_response_depth(
+                    message,
+                    history,
+                    str(model_override or ""),
+                    cancel_event=cancel_event,
+                )
+            except Exception as e:
+                depth_route, depth_reason = "detailed", f"depth_router_error:{_format_runtime_error(e)}"
+            _phase_end("depth_router", {"route": depth_route, "reason": depth_reason})
+            yield f"data: {json.dumps({'type': 'step', 'text': 'response.depth_router', 'args': {'route': depth_route, 'reason': depth_reason}})}\n\n"
+            effective_simple = depth_route == "quick"
+
+        # llama.cpp auto-switch by behavior/model override.
+        # For simple smalltalk without explicit override, skip expensive switch/reload.
+        should_switch = not (effective_simple and not str(model_override or "").strip() and not (llamacpp_overrides or {}))
+        if should_switch:
+            _phase_start("model_switch", {"model_override": str(model_override or "")})
+            ok_switch, switch_info = await _ensure_llamacpp_model_for_override(model_override, llamacpp_overrides)
+            _phase_end("model_switch", {"ok": bool(ok_switch), "detail": str(switch_info or "")})
+            if not ok_switch:
+                yield f"data: {json.dumps({'type': 'error', 'text': switch_info})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            if switch_info not in ("provider_not_llamacpp", "no_override", "already_selected"):
+                yield f"data: {json.dumps({'type': 'step', 'text': 'llamacpp.model_switch', 'args': {'detail': switch_info}})}\n\n"
+            # Always run warmup in llama.cpp after a switch check (even if already_selected),
+            # so we avoid first-call stalls/empty completions on cold model state.
+            if (Config.LLM_PROVIDER or "").strip().lower() == "llamacpp":
+                _phase_start("warmup", {"model_alias": str(Config.LLAMACPP_MODEL_ALIAS or "")})
+                ok_warm, warm_info = await _ensure_llamacpp_warmup(str(Config.LLAMACPP_MODEL_ALIAS or "modelo"))
+                _phase_end("warmup", {"ok": bool(ok_warm), "detail": str(warm_info or "")})
+                if not ok_warm:
+                    yield f"data: {json.dumps({'type': 'error', 'text': f'No se pudo completar warmup del modelo: {warm_info}'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    return
+        elif (Config.LLM_PROVIDER or "").strip().lower() == "llamacpp":
+            # If no switch happened for this request, still do explicit warmup for
+            # the currently active model used by the chat.
+            _maybe_autostart_llamacpp(force=False, reason="chat_request")
+            _phase_start("warmup", {"model_alias": str(Config.LLAMACPP_MODEL_ALIAS or "")})
+            ok_warm, warm_info = await _ensure_llamacpp_warmup(str(Config.LLAMACPP_MODEL_ALIAS or "modelo"))
+            _phase_end("warmup", {"ok": bool(ok_warm), "detail": str(warm_info or "")})
+            if not ok_warm:
+                yield f"data: {json.dumps({'type': 'error', 'text': f'No se pudo completar warmup del modelo: {warm_info}'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
+        if m == "plan":
+            trace["mode_effective"] = "plan"
+            async for ev in _stream_and_trace(_plan_stream(message, history, system_prompt, model_override, harness_override, cancel_event=cancel_event)):
+                yield ev
+            return
+        if m == "iterate":
+            trace["mode_effective"] = "iterate"
+            async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, cancel_event=cancel_event)):
+                yield ev
+            return
+        if m == "simple":
+            trace["mode_effective"] = "simple"
+            async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True, internet_enabled=internet_enabled, tools_mode=tools_mode, cancel_event=cancel_event)):
+                yield ev
+            return
+
+        if m == "normal" and effective_simple and requested_tools_mode != "with_tools":
+            trace["mode_effective"] = "simple_auto_llm_router"
+            async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True, internet_enabled=internet_enabled, tools_mode=tools_mode, cancel_event=cancel_event)):
+                yield ev
+            return
+
+        # Auto-escalate clearly multi-step build requests to iterator mode so the
+        # agent keeps executing beyond a single command (useful in Dev/Código).
+        if m == "normal" and _looks_like_multistep_build_task(message):
+            trace["mode_effective"] = "iterate_auto"
+            async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, cancel_event=cancel_event)):
+                yield ev
+            return
+
+        trace["mode_effective"] = "normal"
+        async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, internet_enabled=internet_enabled, tools_mode=tools_mode, cancel_event=cancel_event)):
             yield ev
+    except asyncio.CancelledError:
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
         return
-    if m == "iterate":
-        async for ev in _stream_and_trace(_iterate_stream(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)):
-            yield ev
-        return
-    if m == "simple":
-        async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run, simple_chat=True)):
-            yield ev
-        return
-    async for ev in _stream_and_trace(_agent_stream_normal(message, history, system_prompt, model_override, harness_override, folder_id, sandbox_root, conversation_id, dry_run)):
-        yield ev
+    finally:
+        _unregister_run_cancel(run_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2886,34 +4261,8 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    # ── Auto-start llama.cpp if configured ───────────────────────────────────
-    if Config.LLM_PROVIDER == "llamacpp":
-        if Config.LLAMACPP_EXECUTABLE and os.path.isfile(Config.LLAMACPP_EXECUTABLE):
-            if Config.LLAMACPP_MODEL_PATH and os.path.isfile(Config.LLAMACPP_MODEL_PATH):
-                global _llamacpp_proc
-                already_up = False
-                already_up = _http_reachable(
-                    f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}/health",
-                    timeout=1.0,
-                )
-
-                if not already_up:
-                    print(f"[unlz] Auto-starting llama.cpp — {Config.LLAMACPP_MODEL_ALIAS}")
-                    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-                    try:
-                        _llamacpp_proc = subprocess.Popen(
-                            _build_llamacpp_args(),
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=flags,
-                        )
-                        print(f"[unlz] llama.cpp PID {_llamacpp_proc.pid}")
-                    except Exception as e:
-                        print(f"[unlz] llama.cpp auto-start failed: {e}")
-            else:
-                print("[unlz] llama.cpp model not found — skipping auto-start")
-        else:
-            print("[unlz] llama.cpp executable not found — skipping auto-start")
+    _reload_config_runtime()
+    _maybe_autostart_llamacpp(force=True, reason="lifespan")
 
     yield
 
@@ -2947,11 +4296,14 @@ async def chat(req: ChatRequest):
             req.system_prompt,
             req.model_override,
             req.harness_override,
+            req.llamacpp_overrides,
             req.folder_id,
             req.sandbox_root,
             req.mode,
             req.conversation_id,
             req.dry_run,
+            req.internet_enabled,
+            req.tools_mode,
         ),
         media_type="text/event-stream",
         headers={
@@ -2985,23 +4337,34 @@ async def health():
     components: dict = {}
 
     if provider == "llamacpp":
-        ok = _http_reachable(f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}/health", timeout=1.5)
+        # Self-heal: if llama.cpp is configured but down, retry start in background
+        # with cooldown, so the user doesn't need to press "Start" manually.
+        global _llamacpp_health_autostart_last_ts
+        now = time.time()
+        # Throttle health-driven autostart; frontend polls /health frequently.
+        if (now - _llamacpp_health_autostart_last_ts) >= 20:
+            _llamacpp_health_autostart_last_ts = now
+            _maybe_autostart_llamacpp(force=False, reason="health")
+        rt = _llamacpp_runtime_state()
+        ok = rt.get("state") == "ready"
         components["llm"] = {
-            "status": "ok" if ok else "error",
-            "details": f"llama.cpp — {Config.LLAMACPP_MODEL_ALIAS}" if ok
-                       else f"llama.cpp unreachable (port {Config.LLAMACPP_PORT})",
+            "status": "ok" if ok else ("warning" if rt.get("state") == "loading" else "error"),
+            "details": str(rt.get("details") or ""),
+            "state": rt.get("state"),
         }
     elif provider == "ollama":
         ok = _http_reachable(f"{Config.OLLAMA_BASE_URL.rstrip('/')}/api/tags", timeout=1.5)
         components["llm"] = {
             "status": "ok" if ok else "error",
             "details": f"Ollama — {Config.OLLAMA_MODEL}" if ok else "Ollama unreachable",
+            "state": "ready" if ok else "not_loaded",
         }
     else:
         has_key = bool(Config.OPENAI_API_KEY)
         components["llm"] = {
             "status": "ok" if has_key else "warning",
             "details": "OpenAI configured" if has_key else "OpenAI key missing",
+            "state": "ready" if has_key else "not_loaded",
         }
 
     rag_ok = os.path.exists(Config.RAG_STORAGE_PATH)
@@ -3038,6 +4401,15 @@ async def get_run_trace(run_id: str):
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"trace read error: {e}")
+
+
+@app.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", (run_id or "").strip())
+    if not safe:
+        raise HTTPException(status_code=400, detail="invalid run id")
+    ok = _set_run_cancel(safe)
+    return {"status": "cancelling" if ok else "not_found", "run_id": safe}
 
 
 @app.get("/snapshots")
@@ -3246,29 +4618,15 @@ async def harnesses_install(req: HarnessInstallRequest):
     if harness_id == "opencode":
         install_errors: list[str] = []
 
-        # 1) Try official install command via PowerShell (best-effort on Windows)
-        if os.name == "nt":
-            try:
-                ps_cmd = "irm https://opencode.ai/install | iex"
-                proc = subprocess.run(
-                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
-                    capture_output=True,
-                    text=True,
-                    timeout=420,
-                )
-                if proc.returncode != 0:
-                    install_errors.append(f"install script: {(proc.stderr or proc.stdout or '').strip()[:400]}")
-            except Exception as e:
-                install_errors.append(f"install script exception: {e}")
-
         op_bin = _opencode_bin()
 
         # 2) npm fallback(s)
-        if not op_bin and shutil.which("npm"):
+        npm_bin = _npm_bin()
+        if not op_bin and npm_bin:
             for pkg in ("opencode-ai", "@opencode-ai/cli", "@opencode/cli"):
                 try:
                     proc = subprocess.run(
-                        ["npm", "install", "-g", pkg],
+                        [npm_bin, "install", "-g", pkg],
                         capture_output=True,
                         text=True,
                         timeout=420,
@@ -3280,6 +4638,8 @@ async def harnesses_install(req: HarnessInstallRequest):
                 op_bin = _opencode_bin()
                 if op_bin:
                     break
+        elif not op_bin:
+            install_errors.append("npm no encontrado (instalá Node.js LTS o agregá npm.cmd al PATH)")
 
         if not op_bin:
             detail = " | ".join([x for x in install_errors if x]) or "Unknown installation failure"
@@ -3372,6 +4732,100 @@ async def harnesses_install(req: HarnessInstallRequest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _llamacpp_proc: Optional[subprocess.Popen] = None
+_llamacpp_switch_lock = asyncio.Lock()
+_llamacpp_switching = False
+_llamacpp_switching_target = ""
+_llamacpp_switching_message = ""
+_llamacpp_active_overrides: dict[str, Any] = {}
+_llamacpp_warmup_lock = asyncio.Lock()
+_llamacpp_warming = False
+_llamacpp_warming_message = ""
+_llamacpp_warm_signature = ""
+_llamacpp_autostart_lock = threading.Lock()
+_llamacpp_autostart_last_try_ts = 0.0
+_llamacpp_autostart_fail_streak = 0
+_llamacpp_health_autostart_last_ts = 0.0
+
+
+def _maybe_autostart_llamacpp(force: bool = False, reason: str = "runtime") -> tuple[bool, str]:
+    """
+    Best-effort managed autostart for llama.cpp.
+    Uses a cooldown to avoid restart storms when config is invalid.
+    """
+    global _llamacpp_autostart_last_try_ts, _llamacpp_autostart_fail_streak
+    _reload_config_runtime()
+
+    if (Config.LLM_PROVIDER or "").lower() != "llamacpp":
+        return False, "provider_not_llamacpp"
+    if not bool(getattr(Config, "LLAMACPP_AUTO_START", True)):
+        return False, "autostart_disabled"
+    if _llamacpp_api_healthy(timeout=0.9):
+        _llamacpp_autostart_fail_streak = 0
+        return False, "already_healthy"
+    if _llamacpp_switching:
+        return False, "switch_in_progress"
+
+    exe = str(Config.LLAMACPP_EXECUTABLE or "").strip()
+    model = str(Config.LLAMACPP_MODEL_PATH or "").strip()
+    if not exe or not os.path.isfile(exe):
+        return False, "missing_executable"
+    if not model or not os.path.isfile(model):
+        return False, "missing_model"
+    build_num = _llamacpp_executable_build_number(exe)
+    if not _llamacpp_is_model_compatible_with_build(model, str(Config.LLAMACPP_MODEL_ALIAS or ""), build_num):
+        switched, detail = _auto_switch_to_compatible_model(reason=reason)
+        if switched:
+            exe = str(Config.LLAMACPP_EXECUTABLE or "").strip()
+            model = str(Config.LLAMACPP_MODEL_PATH or "").strip()
+            build_num = _llamacpp_executable_build_number(exe)
+        else:
+            # Avoid restart loops with incompatible binary/model combinations.
+            _llamacpp_autostart_fail_streak = max(_llamacpp_autostart_fail_streak, 6)
+            return False, f"incompatible_binary:b{build_num}:{detail}"
+
+    if _llamacpp_proc and _llamacpp_proc.poll() is None:
+        listeners = _pids_listening_on_tcp_port(Config.LLAMACPP_PORT)
+        if listeners:
+            rt = _llamacpp_runtime_state()
+            if str(rt.get("state") or "") == "loading":
+                return False, "managed_process_loading"
+        # Managed process alive but no listener/health: recycle it.
+        _llamacpp_stop_internal()
+    if len(_pids_listening_on_tcp_port(Config.LLAMACPP_PORT)) > 0:
+        return False, "external_listener_present"
+
+    now = time.time()
+    base_cooldown = max(3, int(getattr(Config, "LLAMACPP_AUTO_START_COOLDOWN_SEC", 12)))
+    fail_backoff = min(120, base_cooldown * (2 ** min(_llamacpp_autostart_fail_streak, 3)))
+    cooldown = base_cooldown if _llamacpp_autostart_fail_streak <= 0 else fail_backoff
+    if not force and (now - _llamacpp_autostart_last_try_ts) < cooldown:
+        return False, "cooldown_active"
+
+    with _llamacpp_autostart_lock:
+        now = time.time()
+        if not force and (now - _llamacpp_autostart_last_try_ts) < cooldown:
+            return False, "cooldown_active"
+        _llamacpp_autostart_last_try_ts = now
+        try:
+            if _llamacpp_proc and _llamacpp_proc.poll() is None:
+                _llamacpp_stop_internal()
+            res = _llamacpp_start_internal()
+            # Verify readiness briefly to avoid "started but dead" loops.
+            deadline = time.time() + 12
+            while time.time() < deadline:
+                if _llamacpp_api_healthy(timeout=1.0):
+                    _llamacpp_autostart_fail_streak = 0
+                    detail = f"auto-started ({reason})"
+                    print(f"[unlz] llama.cpp {detail} — {Config.LLAMACPP_MODEL_ALIAS}")
+                    return True, str(res.get("status") or "started")
+                time.sleep(0.6)
+            _llamacpp_autostart_fail_streak += 1
+            _llamacpp_stop_internal()
+            return False, "start_unhealthy"
+        except Exception as e:
+            _llamacpp_autostart_fail_streak += 1
+            print(f"[unlz] llama.cpp autostart failed ({reason}): {e}")
+            return False, f"start_failed:{e}"
 
 
 def _pids_listening_on_tcp_port(port: int) -> set[int]:
@@ -3413,50 +4867,474 @@ def _kill_pid_tree(pid: int) -> bool:
         return False
 
 
-def _build_llamacpp_args() -> list[str]:
+def _normalize_llamacpp_overrides(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    try:
+        if raw.get("context_size") is not None and str(raw.get("context_size")).strip() != "":
+            out["context_size"] = int(raw.get("context_size"))
+    except Exception:
+        pass
+    try:
+        if raw.get("n_gpu_layers") is not None and str(raw.get("n_gpu_layers")).strip() != "":
+            out["n_gpu_layers"] = int(raw.get("n_gpu_layers"))
+    except Exception:
+        pass
+    if "flash_attn" in raw and raw.get("flash_attn") is not None:
+        val = raw.get("flash_attn")
+        if isinstance(val, bool):
+            out["flash_attn"] = val
+        elif isinstance(val, str):
+            out["flash_attn"] = val.strip().lower() in ("1", "true", "yes", "on")
+    ctk = str(raw.get("cache_type_k") or "").strip()
+    if ctk:
+        out["cache_type_k"] = ctk
+    ctv = str(raw.get("cache_type_v") or "").strip()
+    if ctv:
+        out["cache_type_v"] = ctv
+    ea = str(raw.get("extra_args") or "").strip()
+    if ea:
+        out["extra_args"] = ea
+    return out
+
+
+def _llamacpp_effective_runtime(overrides: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    ov = _normalize_llamacpp_overrides(overrides)
+    return {
+        "context_size": int(ov.get("context_size", Config.LLAMACPP_CONTEXT_SIZE)),
+        "n_gpu_layers": int(ov.get("n_gpu_layers", Config.LLAMACPP_N_GPU_LAYERS)),
+        "flash_attn": bool(ov.get("flash_attn", Config.LLAMACPP_FLASH_ATTN)),
+        "cache_type_k": str(ov.get("cache_type_k", Config.LLAMACPP_CACHE_TYPE_K or "")).strip(),
+        "cache_type_v": str(ov.get("cache_type_v", Config.LLAMACPP_CACHE_TYPE_V or "")).strip(),
+        "extra_args": str(ov.get("extra_args", Config.LLAMACPP_EXTRA_ARGS or "")).strip(),
+    }
+
+
+def _runtime_signature(model_path: str, model_alias: str, runtime_cfg: dict[str, Any]) -> str:
+    payload = {
+        "model_path": str(model_path or "").strip().lower(),
+        "model_alias": _slug_alias(model_alias or ""),
+        "runtime": runtime_cfg,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _llamacpp_warmup_sync(timeout_sec: int = 180) -> tuple[bool, str]:
+    """
+    Force a tiny completion to warm model weights + template path.
+    This is intentionally outside request-level generation timeout budgets.
+    """
+    base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
+    url = f"{base}/v1/chat/completions"
+    model_alias = str(Config.LLAMACPP_MODEL_ALIAS or "").strip()
+    payload: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": "Warmup only."},
+            {"role": "user", "content": "ok"},
+        ],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": False,
+    }
+    if model_alias:
+        payload["model"] = model_alias
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(req, timeout=max(10, int(timeout_sec))) as resp:
+            body = (resp.read() or b"").decode("utf-8", errors="ignore")
+            if 200 <= int(getattr(resp, "status", 0) or 0) < 300:
+                # Accept partial/minimal JSON as successful warmup.
+                if ("\"choices\"" in body) or ("\"content\"" in body) or ("\"id\"" in body):
+                    return True, "ok"
+                return True, "ok_minimal"
+            return False, f"http_{getattr(resp, 'status', '0')}"
+    except Exception as e:
+        return False, str(e)
+
+
+async def _ensure_llamacpp_warmup(target_label: str = "") -> tuple[bool, str]:
+    global _llamacpp_warming, _llamacpp_warming_message, _llamacpp_warm_signature
+    if (Config.LLM_PROVIDER or "").strip().lower() != "llamacpp":
+        return True, "provider_not_llamacpp"
+    runtime_cfg = _llamacpp_effective_runtime(_llamacpp_active_overrides or {})
+    sig = _runtime_signature(Config.LLAMACPP_MODEL_PATH or "", Config.LLAMACPP_MODEL_ALIAS or "", runtime_cfg)
+    if _llamacpp_warm_signature == sig:
+        return True, "already_warmed"
+    if not _llamacpp_api_healthy(timeout=1.0):
+        return False, "llamacpp_not_ready"
+
+    async with _llamacpp_warmup_lock:
+        runtime_cfg = _llamacpp_effective_runtime(_llamacpp_active_overrides or {})
+        sig = _runtime_signature(Config.LLAMACPP_MODEL_PATH or "", Config.LLAMACPP_MODEL_ALIAS or "", runtime_cfg)
+        if _llamacpp_warm_signature == sig:
+            return True, "already_warmed"
+        label = (target_label or str(Config.LLAMACPP_MODEL_ALIAS or "modelo")).strip()
+        _llamacpp_warming = True
+        _llamacpp_warming_message = f"Cargando el modelo {label}…"
+        try:
+            ok, detail = await asyncio.to_thread(_llamacpp_warmup_sync, 180)
+            if ok:
+                _llamacpp_warm_signature = sig
+                return True, "warmed"
+            return False, f"warmup_failed: {detail}"
+        finally:
+            _llamacpp_warming = False
+            _llamacpp_warming_message = ""
+
+
+def _llamacpp_executable_build_number(exe_path: str) -> int:
+    """
+    Best-effort extraction of llama.cpp build id from executable path,
+    e.g. "...\\llama.cpp-b8553\\llama-server.exe" -> 8553.
+    """
+    try:
+        m = re.search(r"b(\d{3,6})", str(exe_path or ""), flags=re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def _llamacpp_model_needs_newer_build(model_path: str, model_alias: str) -> bool:
+    """
+    Heuristic guard for models unsupported by older llama.cpp builds.
+    Current known case: Gemma 4 (arch gemma4) requires newer builds.
+    """
+    s = f"{str(model_path or '')} {str(model_alias or '')}".lower()
+    return ("gemma-4" in s) or ("gemma4" in s)
+
+
+def _is_mmproj_candidate(model_entry: dict[str, Any]) -> bool:
+    name = str(model_entry.get("name") or "").lower()
+    stem = str(model_entry.get("stem") or "").lower()
+    alias = str(model_entry.get("alias") or "").lower()
+    blob = f"{name}|{stem}|{alias}"
+    return "mmproj" in blob
+
+
+def _strip_quant_tail(alias: str) -> str:
+    s = _slug_alias(alias or "")
+    # Remove trailing quant-like suffixes (q5-k-p, iq4-xs, f16, bf16, etc.)
+    s = re.sub(r"-(?:ud-)?q\d[\w-]*$", "", s)
+    s = re.sub(r"-iq\d[\w-]*$", "", s)
+    s = re.sub(r"-(?:f16|bf16|fp16|fp8|int8|int4)$", "", s)
+    return s.strip("-")
+
+
+def _pick_best_model_match(target_raw: str, models: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """
+    Resolve model_override to best local GGUF candidate.
+    Excludes mmproj entries and supports fuzzy family fallback.
+    """
+    target_raw = str(target_raw or "").strip()
+    if not target_raw:
+        return None
+
+    clean_models = [m for m in models if not _is_mmproj_candidate(m)]
+    if not clean_models:
+        return None
+
+    target = _slug_alias(target_raw)
+    target_low = target_raw.lower()
+
+    # 1) Exact alias
+    for c in clean_models:
+        if c.get("alias", "") == target:
+            return c
+
+    # 2) Exact stem/name text
+    for c in clean_models:
+        stem = str(c.get("stem", "")).lower()
+        name = str(c.get("name", "")).lower()
+        if target_low == stem or target_low == name:
+            return c
+
+    # 3) Substring blob
+    for c in clean_models:
+        blob = f"{c.get('alias','')}|{str(c.get('stem','')).lower()}|{str(c.get('name','')).lower()}"
+        if target_low in blob or target in blob:
+            return c
+
+    # 4) Family fallback (strip quant tails)
+    core = _strip_quant_tail(target)
+    if core:
+        family = []
+        for c in clean_models:
+            a = str(c.get("alias") or "")
+            if a.startswith(core) or core in a:
+                family.append(c)
+        if family:
+            # Prefer same family with largest size (better quality).
+            family.sort(key=lambda x: float(x.get("size_gb") or 0.0), reverse=True)
+            return family[0]
+
+    # 5) Coarse fallback by main model family hints
+    hints = [h for h in ("qwen3.6-27b", "qwen3.6", "qwen") if h in target]
+    if hints:
+        for h in hints:
+            fam = [c for c in clean_models if h in str(c.get("alias") or "")]
+            if fam:
+                fam.sort(key=lambda x: float(x.get("size_gb") or 0.0), reverse=True)
+                return fam[0]
+
+    return None
+
+
+def _llamacpp_is_model_compatible_with_build(model_path: str, model_alias: str, build_num: int) -> bool:
+    if build_num <= 0:
+        return True
+    if _llamacpp_model_needs_newer_build(model_path, model_alias) and build_num < 8900:
+        return False
+    return True
+
+
+def _rank_fallback_candidate(path: str, alias: str, size_gb: float) -> tuple[int, float]:
+    blob = f"{str(path or '').lower()} {str(alias or '').lower()}"
+    score = 100
+    if "qwen3.6" in blob or "qwen3-6" in blob:
+        score = 0
+    elif "qwen" in blob:
+        score = 10
+    elif "deepseek" in blob:
+        score = 20
+    elif "gemma-3" in blob or "gemma3" in blob:
+        score = 30
+    elif "llama" in blob:
+        score = 40
+    elif "mistral" in blob:
+        score = 50
+    # Prefer medium/large local models around ~20GB when tie-breaking.
+    size_penalty = abs(float(size_gb or 0.0) - 20.0)
+    return (score, size_penalty)
+
+
+def _pick_compatible_fallback_model(exe_path: str, current_model_path: str) -> Optional[dict[str, Any]]:
+    build_num = _llamacpp_executable_build_number(exe_path)
+    models = _scan_gguf_models()
+    current_norm = str(current_model_path or "").strip().lower()
+    candidates: list[dict[str, Any]] = []
+    for m in models:
+        mpath = str(m.get("path") or "").strip()
+        if not mpath:
+            continue
+        if current_norm and mpath.lower() == current_norm:
+            continue
+        if not os.path.isfile(mpath):
+            continue
+        malias = str(m.get("alias") or _slug_alias(Path(mpath).stem)).strip()
+        if not _llamacpp_is_model_compatible_with_build(mpath, malias, build_num):
+            continue
+        candidates.append(m)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda m: _rank_fallback_candidate(
+            str(m.get("path") or ""),
+            str(m.get("alias") or ""),
+            float(m.get("size_gb") or 0.0),
+        )
+    )
+    return candidates[0]
+
+
+def _auto_switch_to_compatible_model(reason: str = "compat") -> tuple[bool, str]:
+    """
+    Persistently switch LLAMACPP_MODEL_PATH/ALIAS to a compatible local GGUF
+    when current model is incompatible with current llama.cpp build.
+    """
+    _reload_config_runtime()
+    exe = str(Config.LLAMACPP_EXECUTABLE or "").strip()
+    current_model = str(Config.LLAMACPP_MODEL_PATH or "").strip()
+    if not exe or not os.path.isfile(exe):
+        return False, "missing_executable"
+    if not current_model:
+        return False, "missing_current_model"
+    pick = _pick_compatible_fallback_model(exe, current_model)
+    if not pick:
+        return False, "no_compatible_fallback"
+    new_path = str(pick.get("path") or "").strip()
+    new_alias = str(pick.get("alias") or "").strip() or _slug_alias(Path(new_path).stem)
+    _upsert_env_settings({
+        "LLAMACPP_MODEL_PATH": new_path,
+        "LLAMACPP_MODEL_ALIAS": new_alias,
+    })
+    _reload_config_runtime()
+    print(
+        f"[unlz] modelo incompatible detectado; fallback automático aplicado ({reason}): "
+        f"{new_alias} @ {new_path}"
+    )
+    return True, new_alias
+
+
+def _build_llamacpp_args(overrides: Optional[dict[str, Any]] = None) -> list[str]:
+    runtime_cfg = _llamacpp_effective_runtime(overrides)
+    model_hint = f"{Config.LLAMACPP_MODEL_ALIAS} {Config.LLAMACPP_MODEL_PATH}".lower()
+    is_vision = any(k in model_hint for k in ("vision", "-vl", "_vl", "qwen2.5-vl", "gemma-4-vision"))
+
     args = [
         Config.LLAMACPP_EXECUTABLE,
         "-m", Config.LLAMACPP_MODEL_PATH,
         "--alias", Config.LLAMACPP_MODEL_ALIAS,
         "--host", Config.LLAMACPP_HOST,
         "--port", str(Config.LLAMACPP_PORT),
-        "-c", str(Config.LLAMACPP_CONTEXT_SIZE),
-        "-ngl", str(Config.LLAMACPP_N_GPU_LAYERS),
+        "-c", str(runtime_cfg["context_size"]),
+        "-ngl", str(runtime_cfg["n_gpu_layers"]),
     ]
-    if Config.LLAMACPP_FLASH_ATTN:
+    if runtime_cfg["flash_attn"]:
         # Newer llama.cpp builds require an explicit value.
         args += ["--flash-attn", "on"]
-    if Config.LLAMACPP_CACHE_TYPE_K:
-        args += ["--cache-type-k", Config.LLAMACPP_CACHE_TYPE_K]
-    if Config.LLAMACPP_CACHE_TYPE_V:
-        args += ["--cache-type-v", Config.LLAMACPP_CACHE_TYPE_V]
-    if Config.LLAMACPP_EXTRA_ARGS:
-        args += Config.LLAMACPP_EXTRA_ARGS.split()
+    if runtime_cfg["cache_type_k"]:
+        args += ["--cache-type-k", str(runtime_cfg["cache_type_k"])]
+    if runtime_cfg["cache_type_v"]:
+        args += ["--cache-type-v", str(runtime_cfg["cache_type_v"])]
+    if runtime_cfg["extra_args"]:
+        raw_tokens = str(runtime_cfg["extra_args"]).split()
+        if is_vision:
+            args += raw_tokens
+        else:
+            filtered: list[str] = []
+            i = 0
+            while i < len(raw_tokens):
+                tok = raw_tokens[i]
+                low = tok.lower()
+                if low in ("--image-min-tokens", "--image-max-tokens", "--batch-size", "--ubatch-size"):
+                    i += 2  # drop flag + value
+                    continue
+                filtered.append(tok)
+                i += 1
+            args += filtered
     return args
 
 
-@app.post("/llamacpp/start")
-async def llamacpp_start():
-    global _llamacpp_proc
-    _reload_config_runtime()
+def _llamacpp_runtime_state() -> dict:
+    """
+    Runtime state for UI blocking:
+    - ready: model API available
+    - loading: llama.cpp process reachable but model/API still loading, or auto-switch in progress
+    - not_loaded: unavailable/stopped/misconfigured
+    """
+    if _llamacpp_switching:
+        target = _llamacpp_switching_target or "modelo solicitado"
+        detail = _llamacpp_switching_message or f"Cambiando a {target}…"
+        return {"state": "loading", "details": detail}
+    if _llamacpp_warming:
+        detail = _llamacpp_warming_message or "Cargando el modelo, espere por favor…"
+        return {"state": "loading", "details": detail}
 
+    if not Config.LLAMACPP_EXECUTABLE or not os.path.isfile(Config.LLAMACPP_EXECUTABLE):
+        return {"state": "not_loaded", "details": "llama.cpp no configurado (falta ejecutable)."}
+    if not Config.LLAMACPP_MODEL_PATH or not os.path.isfile(Config.LLAMACPP_MODEL_PATH):
+        return {"state": "not_loaded", "details": "Modelo no cargado (falta LLAMACPP_MODEL_PATH válido)."}
+    build_num = _llamacpp_executable_build_number(str(Config.LLAMACPP_EXECUTABLE or ""))
+    if _llamacpp_model_needs_newer_build(
+        str(Config.LLAMACPP_MODEL_PATH or ""),
+        str(Config.LLAMACPP_MODEL_ALIAS or ""),
+    ) and build_num and build_num < 8900:
+        return {
+            "state": "not_loaded",
+            "details": f"llama.cpp b{build_num} no soporta este modelo (Gemma 4). Actualizá llama.cpp.",
+        }
+
+    if _llamacpp_api_healthy(timeout=1.0):
+        return {"state": "ready", "details": f"llama.cpp — {Config.LLAMACPP_MODEL_ALIAS}"}
+
+    base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
+    status_h, body_h = _http_get_text(f"{base}/health", timeout=1.0)
+    body_l = (body_h or "").lower()
+    managed_running = bool(_llamacpp_proc and _llamacpp_proc.poll() is None)
+    has_listener = len(_pids_listening_on_tcp_port(Config.LLAMACPP_PORT)) > 0
+
+    if status_h > 0:
+        if status_h == 503 or "load" in body_l or "loading" in body_l:
+            return {"state": "loading", "details": "Modelo cargando, esperá por favor…"}
+        if managed_running or has_listener:
+            return {"state": "loading", "details": "Servidor llama.cpp iniciando…"}
+        return {"state": "not_loaded", "details": f"llama.cpp no listo (health {status_h})."}
+
+    if managed_running:
+        return {"state": "loading", "details": "Modelo cargando, esperá por favor…"}
+    return {"state": "not_loaded", "details": f"llama.cpp no disponible (port {Config.LLAMACPP_PORT})."}
+
+
+def _llamacpp_start_internal(overrides: Optional[dict[str, Any]] = None) -> dict:
+    global _llamacpp_proc, _llamacpp_active_overrides, _llamacpp_warm_signature
+    _reload_config_runtime()
     if not Config.LLAMACPP_EXECUTABLE:
         raise HTTPException(400, "LLAMACPP_EXECUTABLE not configured")
     if not os.path.isfile(Config.LLAMACPP_EXECUTABLE):
         raise HTTPException(400, f"Executable not found: {Config.LLAMACPP_EXECUTABLE}")
     if not os.path.isfile(Config.LLAMACPP_MODEL_PATH):
         raise HTTPException(400, f"Model not found: {Config.LLAMACPP_MODEL_PATH}")
+    build_num = _llamacpp_executable_build_number(Config.LLAMACPP_EXECUTABLE)
+    if not _llamacpp_is_model_compatible_with_build(
+        Config.LLAMACPP_MODEL_PATH,
+        str(Config.LLAMACPP_MODEL_ALIAS or ""),
+        build_num,
+    ):
+        switched, detail = _auto_switch_to_compatible_model(reason="manual_start")
+        if switched:
+            _reload_config_runtime()
+            build_num = _llamacpp_executable_build_number(Config.LLAMACPP_EXECUTABLE)
+            if not _llamacpp_is_model_compatible_with_build(
+                Config.LLAMACPP_MODEL_PATH,
+                str(Config.LLAMACPP_MODEL_ALIAS or ""),
+                build_num,
+            ):
+                raise HTTPException(
+                    400,
+                    f"Modelo incompatible con tu llama.cpp actual (b{build_num}). Actualizá llama.cpp.",
+                )
+        else:
+            raise HTTPException(
+                400,
+                f"Modelo incompatible con tu llama.cpp actual (b{build_num}) y no se encontró fallback compatible ({detail}).",
+            )
 
     if _llamacpp_proc and _llamacpp_proc.poll() is None:
-        return {"status": "already_running", "pid": _llamacpp_proc.pid}
+        # Avoid stale "already running": recycle a zombie managed process that
+        # has no healthy API nor active listener.
+        if _llamacpp_api_healthy(timeout=0.9):
+            return {"status": "already_running", "pid": _llamacpp_proc.pid}
+        listeners = _pids_listening_on_tcp_port(Config.LLAMACPP_PORT)
+        if listeners:
+            return {"status": "already_running", "pid": _llamacpp_proc.pid}
+        _llamacpp_stop_internal()
 
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    _llamacpp_proc = subprocess.Popen(
-        _build_llamacpp_args(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=flags,
-    )
+    normalized_overrides = _normalize_llamacpp_overrides(overrides)
+
+    def _spawn(local_overrides: dict[str, Any]) -> subprocess.Popen:
+        return subprocess.Popen(
+            _build_llamacpp_args(local_overrides),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+
+    _llamacpp_proc = _spawn(normalized_overrides)
+    _llamacpp_active_overrides = normalized_overrides
+    _llamacpp_warm_signature = ""
+
+    # If process exits immediately, retry once with safer args (drop extra_args).
+    time.sleep(1.0)
+    if _llamacpp_proc.poll() is not None:
+        safe_overrides = dict(normalized_overrides)
+        safe_overrides["extra_args"] = ""
+        _llamacpp_proc = _spawn(safe_overrides)
+        _llamacpp_active_overrides = safe_overrides
+        _llamacpp_warm_signature = ""
+        time.sleep(1.0)
+        if _llamacpp_proc.poll() is not None:
+            rc = _llamacpp_proc.poll()
+            _llamacpp_proc = None
+            raise HTTPException(
+                500,
+                f"llama.cpp no pudo iniciar (exit {rc}). Revisá modelo/args en Configuración.",
+            )
+
     return {
         "status": "started",
         "pid": _llamacpp_proc.pid,
@@ -3464,14 +5342,12 @@ async def llamacpp_start():
     }
 
 
-@app.post("/llamacpp/stop")
-async def llamacpp_stop():
-    global _llamacpp_proc
+def _llamacpp_stop_internal() -> dict:
+    global _llamacpp_proc, _llamacpp_warm_signature
     _reload_config_runtime()
     killed_pids: list[int] = []
     managed_pid: Optional[int] = None
 
-    # 1) Stop managed process (if any)
     if _llamacpp_proc is not None and _llamacpp_proc.poll() is None:
         managed_pid = _llamacpp_proc.pid
         try:
@@ -3489,20 +5365,19 @@ async def llamacpp_stop():
             if managed_pid:
                 killed_pids.append(managed_pid)
             _llamacpp_proc = None
+            _llamacpp_warm_signature = ""
     else:
         _llamacpp_proc = None
+        _llamacpp_warm_signature = ""
 
-    # 2) Also kill any process still listening on the configured llama.cpp port.
-    # This covers orphan/external llama-server instances that still hold VRAM.
     port_pids = _pids_listening_on_tcp_port(Config.LLAMACPP_PORT)
     for pid in sorted(port_pids):
         if _kill_pid_tree(pid):
             killed_pids.append(pid)
 
-    # 3) Wait a bit for socket/process teardown.
     running = False
     for _ in range(12):
-        running = _http_reachable(f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}/health", timeout=0.5)
+        running = _llamacpp_api_healthy(timeout=0.5)
         if not running:
             break
         time.sleep(0.25)
@@ -3514,11 +5389,155 @@ async def llamacpp_stop():
     return {"status": "stopped", "running": False, "killed_pids": sorted(set(killed_pids))}
 
 
+async def _ensure_llamacpp_model_for_override(
+    model_override: str,
+    runtime_overrides: Optional[dict[str, Any]] = None,
+) -> tuple[bool, str]:
+    """
+    Ensure llama.cpp runtime matches request:
+    - optional model switch by model_override
+    - optional runtime arg overrides (behavior-level)
+    Returns (ok, message).
+    """
+    if Config.LLM_PROVIDER != "llamacpp":
+        return True, "provider_not_llamacpp"
+
+    target_raw = str(model_override or "").strip()
+    wanted_overrides = _normalize_llamacpp_overrides(runtime_overrides)
+    picked = None
+    target_path = str(Config.LLAMACPP_MODEL_PATH or "").strip()
+    target_alias = str(Config.LLAMACPP_MODEL_ALIAS or "").strip()
+
+    if target_raw:
+        candidates = _scan_gguf_models()
+        picked = _pick_best_model_match(target_raw, candidates)
+        if picked is None:
+            return False, f"No encontré un GGUF que coincida con '{target_raw}'."
+        target_path = str(picked.get("path") or "").strip()
+        target_alias = str(picked.get("alias") or "").strip() or _slug_alias(Path(target_path).stem)
+
+    if not target_path:
+        return False, "Ruta de modelo destino inválida."
+
+    global _llamacpp_switching, _llamacpp_switching_target, _llamacpp_switching_message, _llamacpp_active_overrides
+    async with _llamacpp_switch_lock:
+        _reload_config_runtime()
+        prev_provider = str(Config.LLM_PROVIDER or "llamacpp").strip() or "llamacpp"
+        prev_model_path = str(Config.LLAMACPP_MODEL_PATH or "").strip()
+        prev_model_alias = str(Config.LLAMACPP_MODEL_ALIAS or "").strip()
+        prev_overrides = dict(_llamacpp_active_overrides or {})
+
+        current_sig = _runtime_signature(
+            Config.LLAMACPP_MODEL_PATH or "",
+            Config.LLAMACPP_MODEL_ALIAS or "",
+            _llamacpp_effective_runtime(prev_overrides),
+        )
+        target_sig = _runtime_signature(
+            target_path,
+            target_alias,
+            _llamacpp_effective_runtime(wanted_overrides),
+        )
+        if current_sig == target_sig and _llamacpp_api_healthy(timeout=1.0):
+            return True, "already_selected"
+
+        switch_label = target_alias or target_raw or str(Config.LLAMACPP_MODEL_ALIAS or "local-model")
+        _llamacpp_switching = True
+        _llamacpp_switching_target = switch_label
+        _llamacpp_switching_message = f"Cambiando configuración de {switch_label}…"
+        try:
+            # Persist only model/provider; runtime overrides are request-scoped.
+            env_payload = {"LLM_PROVIDER": "llamacpp"}
+            if target_path and target_path != prev_model_path:
+                env_payload["LLAMACPP_MODEL_PATH"] = target_path
+            if target_alias and target_alias != prev_model_alias:
+                env_payload["LLAMACPP_MODEL_ALIAS"] = target_alias
+            if len(env_payload) > 1:
+                _upsert_env_settings(env_payload)
+            else:
+                _reload_config_runtime()
+
+            _llamacpp_switching_message = "Reiniciando llama.cpp…"
+            _llamacpp_stop_internal()
+            _llamacpp_start_internal(wanted_overrides)
+            _llamacpp_switching_message = "Modelo cargando, esperá por favor…"
+
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                if _llamacpp_api_healthy(timeout=1.2):
+                    _llamacpp_switching_message = "Cargando el modelo, espere por favor…"
+                    ok_warm, warm_info = await _ensure_llamacpp_warmup(switch_label)
+                    if not ok_warm:
+                        return False, f"Warmup falló para '{switch_label}': {warm_info}"
+                    _reload_config_runtime()
+                    return True, f"Modelo activo: {Config.LLAMACPP_MODEL_ALIAS}"
+                await asyncio.sleep(0.7)
+
+            # rollback
+            rb_payload = {
+                "LLM_PROVIDER": prev_provider,
+                "LLAMACPP_MODEL_ALIAS": prev_model_alias,
+            }
+            if prev_model_path:
+                rb_payload["LLAMACPP_MODEL_PATH"] = prev_model_path
+            _upsert_env_settings(rb_payload)
+            _llamacpp_switching_message = "Restaurando modelo anterior…"
+            _llamacpp_stop_internal()
+            _llamacpp_start_internal(prev_overrides)
+            rb_deadline = time.time() + 60
+            while time.time() < rb_deadline:
+                if _llamacpp_api_healthy(timeout=1.0):
+                    break
+                await asyncio.sleep(0.6)
+            return False, f"Timeout cargando modelo '{switch_label}'. Se restauró el modelo anterior."
+        except HTTPException as he:
+            try:
+                rb_payload = {
+                    "LLM_PROVIDER": prev_provider,
+                    "LLAMACPP_MODEL_ALIAS": prev_model_alias,
+                }
+                if prev_model_path:
+                    rb_payload["LLAMACPP_MODEL_PATH"] = prev_model_path
+                _upsert_env_settings(rb_payload)
+                _llamacpp_stop_internal()
+                _llamacpp_start_internal(prev_overrides)
+            except Exception:
+                pass
+            return False, str(he.detail)
+        except Exception as e:
+            try:
+                rb_payload = {
+                    "LLM_PROVIDER": prev_provider,
+                    "LLAMACPP_MODEL_ALIAS": prev_model_alias,
+                }
+                if prev_model_path:
+                    rb_payload["LLAMACPP_MODEL_PATH"] = prev_model_path
+                _upsert_env_settings(rb_payload)
+                _llamacpp_stop_internal()
+                _llamacpp_start_internal(prev_overrides)
+            except Exception:
+                pass
+            return False, f"Error cambiando modelo/configuración: {e}"
+        finally:
+            _llamacpp_switching = False
+            _llamacpp_switching_target = ""
+            _llamacpp_switching_message = ""
+
+
+@app.post("/llamacpp/start")
+async def llamacpp_start():
+    return _llamacpp_start_internal()
+
+
+@app.post("/llamacpp/stop")
+async def llamacpp_stop():
+    return _llamacpp_stop_internal()
+
+
 @app.get("/llamacpp/status")
 async def llamacpp_status():
     _reload_config_runtime()
     base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
-    running = _http_reachable(f"{base}/health", timeout=1.0)
+    running = _llamacpp_api_healthy(timeout=1.0)
     managed = bool(_llamacpp_proc and _llamacpp_proc.poll() is None)
     return {
         "running": running,
@@ -3688,71 +5707,558 @@ async def llamacpp_installer_run():
 async def list_gguf_models():
     """Scan filesystem for .gguf files and return metadata."""
     _reload_config_runtime()  # pick up latest .env in case user just saved settings
+    return _scan_gguf_models()
 
-    search_roots: set[Path] = set()
 
-    def add_if_exists(p: Path) -> None:
+@app.get("/local/behaviors")
+async def list_local_behaviors():
+    """Return machine-local behavior profiles from DATA_DIR/local_behaviors.json."""
+    _reload_config_runtime()
+    return _load_local_behaviors()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model Hub
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    import hub_catalog as _hub_catalog  # type: ignore
+    _HUB_OK = True
+except ImportError:
+    _hub_catalog = None  # type: ignore
+    _HUB_OK = False
+
+_hub_downloads: dict[str, dict] = {}   # download_id → progress dict
+
+_HF_QUANT_RE = re.compile(r"(IQ\d+_[A-Z_]+|Q\d+_[A-Z_]+|Q\d+|FP16|BF16|F16)", re.IGNORECASE)
+
+
+def _hf_guess_quant(filename: str) -> str:
+    m = _HF_QUANT_RE.search(filename or "")
+    return m.group(1).upper() if m else "unknown"
+
+
+def _hf_parse_repo_and_filename(q: str) -> tuple[str, str]:
+    raw = (q or "").strip()
+    if not raw:
+        return "", ""
+
+    # URL mode
+    if "huggingface.co/" in raw:
         try:
-            if p.exists():
-                search_roots.add(p.resolve())
-        except (OSError, PermissionError):
-            pass
+            parsed = urlparse(raw)
+            parts = [p for p in (parsed.path or "").split("/") if p]
+            if len(parts) >= 2:
+                repo = f"{parts[0]}/{parts[1]}"
+                filename = ""
+                # .../resolve/main/<filename> or .../blob/main/<filename>
+                if len(parts) >= 5 and parts[2] in ("resolve", "blob") and parts[3] == "main":
+                    filename = "/".join(parts[4:])
+                return repo, filename
+        except Exception:
+            return "", ""
 
-    # 1. Explicit LLAMACPP_MODELS_DIR (highest priority)
-    models_dir = Config.LLAMACPP_MODELS_DIR or os.getenv("LLAMACPP_MODELS_DIR", "")
-    if models_dir:
-        add_if_exists(Path(models_dir))
+    # Direct repo shorthand: org/repo
+    if "/" in raw and " " not in raw and not raw.startswith("http"):
+        p = [x for x in raw.split("/") if x]
+        if len(p) >= 2:
+            return f"{p[0]}/{p[1]}", ""
 
-    # 2. Derive from current model path (go up to the models root)
-    if Config.LLAMACPP_MODEL_PATH:
-        p = Path(Config.LLAMACPP_MODEL_PATH)
-        add_if_exists(p.parent.parent)  # <root>/<ModelFolder>/<file>.gguf
-        add_if_exists(p.parent)
+    return "", ""
 
-    # 3. Common Windows locations
-    userprofile = os.environ.get("USERPROFILE") or os.environ.get("HOME") or ""
-    for rel in ("Models\\llamacpp", "Models", "models\\llamacpp", "models"):
-        if userprofile:
-            add_if_exists(Path(userprofile) / rel)
 
-    # 4. Python home fallback
+def _hf_http_json(url: str, timeout: int = 20) -> Any:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "UNLZ-Agent/2.0",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(req, timeout=timeout) as resp:
+        payload = resp.read().decode("utf-8", errors="ignore")
+    return json.loads(payload or "{}")
+
+
+def _hf_score_filename(name: str) -> int:
+    up = (name or "").upper()
+    # Prefer practical quants first, avoid full-precision as default candidate
+    if "Q4_K_M" in up:
+        return 100
+    if "Q5_K_M" in up:
+        return 95
+    if "Q6_K" in up:
+        return 90
+    if "Q8_0" in up:
+        return 82
+    if "Q3_K" in up:
+        return 80
+    if "IQ4" in up:
+        return 78
+    if "IQ3" in up:
+        return 70
+    if "Q2" in up or "IQ2" in up:
+        return 55
+    if "F16" in up or "BF16" in up or "FP16" in up:
+        return 15
+    return 40
+
+
+def _hf_fetch_repo_ggufs(repo: str) -> dict[str, Any]:
+    safe_repo = quote(repo, safe="/")
+    meta = _hf_http_json(f"https://huggingface.co/api/models/{safe_repo}", timeout=20)
+    siblings = meta.get("siblings") or []
+    files: list[dict[str, Any]] = []
+    for sib in siblings:
+        rfilename = (sib or {}).get("rfilename") or ""
+        if not rfilename.lower().endswith(".gguf"):
+            continue
+        size_raw = (sib or {}).get("size")
+        size_gb = None
+        try:
+            if size_raw is not None:
+                size_gb = round(float(size_raw) / (1024 ** 3), 2)
+        except Exception:
+            size_gb = None
+        files.append({
+            "filename": rfilename,
+            "size_gb": size_gb,
+            "quant": _hf_guess_quant(rfilename),
+        })
+
+    files.sort(key=lambda x: (_hf_score_filename(x.get("filename", "")), x.get("size_gb") or 9999), reverse=True)
+    updated = meta.get("lastModified") or meta.get("createdAt") or ""
+    return {
+        "repo": repo,
+        "title": meta.get("id") or repo,
+        "downloads": int(meta.get("downloads") or 0),
+        "likes": int(meta.get("likes") or 0),
+        "updated_at": str(updated),
+        "gguf_count": len(files),
+        "recommended_filename": (files[0]["filename"] if files else None),
+        "files": files[:24],
+    }
+
+
+@app.get("/hub/search")
+async def hub_search(q: str = "", limit: int = 8):
+    """
+    Search Hugging Face models by URL/name and return GGUF alternatives.
+    - If query is a HF URL or org/repo, resolves directly.
+    - Otherwise uses HF search API and enriches top repos with GGUF file lists.
+    """
+    q = (q or "").strip()
+    if not q:
+        raise HTTPException(400, "query is required")
+    limit = max(1, min(int(limit or 8), 20))
+
+    repo_hint, file_hint = _hf_parse_repo_and_filename(q)
+    repos: list[str] = []
+    results: list[dict[str, Any]] = []
+
     try:
-        add_if_exists(Path.home() / "Models" / "llamacpp")
-        add_if_exists(Path.home() / "Models")
+        if repo_hint:
+            repos = [repo_hint]
+        else:
+            sq = quote(q)
+            raw = _hf_http_json(
+                f"https://huggingface.co/api/models?search={sq}&limit={max(limit * 3, 15)}&sort=downloads&direction=-1",
+                timeout=20,
+            )
+            seen: set[str] = set()
+            for item in (raw or []):
+                repo = (item or {}).get("id") or (item or {}).get("modelId") or ""
+                if not repo or repo in seen:
+                    continue
+                seen.add(repo)
+                repos.append(repo)
+                if len(repos) >= limit:
+                    break
+
+        for repo in repos:
+            try:
+                info = _hf_fetch_repo_ggufs(repo)
+            except Exception:
+                continue
+            if info["gguf_count"] <= 0:
+                continue
+            if repo == repo_hint and file_hint:
+                match = next((f for f in info["files"] if f["filename"].lower() == file_hint.lower()), None)
+                if match:
+                    info["recommended_filename"] = match["filename"]
+            results.append(info)
+            if len(results) >= limit:
+                break
+    except Exception as exc:
+        raise HTTPException(502, f"HF search failed: {exc}")
+
+    return {"query": q, "results": results}
+
+
+@app.get("/hub/catalog")
+async def hub_get_catalog():
+    """Curated model catalog + online-enriched recommendations."""
+    if not _HUB_OK:
+        raise HTTPException(503, "hub_catalog.py not found next to agent_server.py")
+
+    vram_gb = 0.0
+    ram_gb = 0.0
+    try:
+        vs = _collect_vram_stats()
+        vram_gb = float(vs.get("vram_total_gb") or 0)
+        import psutil as _psutil
+        ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
     except Exception:
         pass
 
-    models = []
-    seen: set[str] = set()
+    tier = _hub_catalog.classify_hardware(vram_gb, ram_gb)
+    runtime_catalog, online_meta = _hub_catalog.get_runtime_catalog()
+    recs = _hub_catalog.get_recommendations(vram_gb, ram_gb, runtime_catalog)
 
-    for root in search_roots:
+    return {
+        "hardware": {
+            "vram_gb": round(vram_gb, 1),
+            "ram_gb": round(ram_gb, 1),
+            "tier": tier,
+        },
+        "catalog": runtime_catalog,
+        "recommendations": recs,
+        "online": online_meta,
+    }
+
+
+@app.get("/hub/check-update")
+async def hub_check_update():
+    """Check if current model has an available upgrade."""
+    if not _HUB_OK:
+        return {"update": None}
+
+    current_path = Config.LLAMACPP_MODEL_PATH or ""
+    current_alias = Config.LLAMACPP_MODEL_ALIAS or ""
+    # Also try live status for alias
+    try:
+        base = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
+        if _http_reachable(f"{base}/health", timeout=0.5):
+            current_alias = Config.LLAMACPP_MODEL_ALIAS or current_alias
+    except Exception:
+        pass
+
+    runtime_catalog, _online_meta = _hub_catalog.get_runtime_catalog()
+    update = _hub_catalog.check_for_update(current_path, current_alias, runtime_catalog)
+    return {"update": update, "current_model": current_path}
+
+
+@app.post("/hub/download")
+async def hub_start_download(body: dict):
+    """Start a background HuggingFace download. Returns {download_id}."""
+    if not _HUB_OK:
+        raise HTTPException(503, "hub_catalog not available")
+
+    hf_repo: str = body.get("hf_repo", "").strip()
+    filename: str = body.get("filename", "").strip()
+    dest_dir: str = (body.get("dest_dir") or Config.LLAMACPP_MODELS_DIR or "").strip()
+
+    if not hf_repo or not filename:
+        raise HTTPException(400, "hf_repo and filename are required")
+    if not dest_dir:
+        raise HTTPException(400, "dest_dir required — set LLAMACPP_MODELS_DIR in Settings")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    download_id = str(uuid.uuid4())[:8]
+    url = f"https://huggingface.co/{hf_repo}/resolve/main/{filename}"
+    dest_path = os.path.join(dest_dir, filename)
+
+    _hub_downloads[download_id] = {
+        "id": download_id,
+        "url": url,
+        "hf_repo": hf_repo,
+        "filename": filename,
+        "dest_path": dest_path,
+        "status": "starting",
+        "progress": 0.0,
+        "downloaded_gb": 0.0,
+        "total_gb": 0.0,
+        "speed_mbps": 0.0,
+        "eta_s": 0,
+        "error": None,
+        "cancelled": False,
+    }
+
+    asyncio.create_task(_run_hub_download(download_id, url, dest_path))
+    return {"download_id": download_id}
+
+
+async def _run_hub_download(download_id: str, url: str, dest_path: str) -> None:
+    info = _hub_downloads[download_id]
+    part_path = dest_path + ".part"
+    try:
+        req = Request(url, headers={"User-Agent": "UNLZ-Agent/2.0"})
+        loop = asyncio.get_event_loop()
+
+        def _do_download() -> None:
+            with urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", 0) or 0)
+                info["total_gb"] = total / (1024 ** 3)
+                info["status"] = "downloading"
+
+                downloaded = 0
+                chunk = 1 << 20   # 1 MB
+                t_last = time.monotonic()
+                bytes_window = 0
+
+                with open(part_path, "wb") as fh:
+                    while True:
+                        if info["cancelled"]:
+                            info["status"] = "cancelled"
+                            return
+                        data = resp.read(chunk)
+                        if not data:
+                            break
+                        fh.write(data)
+                        downloaded += len(data)
+                        bytes_window += len(data)
+                        now = time.monotonic()
+                        dt = now - t_last
+                        if dt >= 0.5:
+                            info["speed_mbps"] = (bytes_window / dt) / (1024 * 1024)
+                            bytes_window = 0
+                            t_last = now
+                        if total:
+                            info["progress"] = downloaded / total
+                            remaining = total - downloaded
+                            bps = max(info["speed_mbps"] * 1024 * 1024, 1)
+                            info["eta_s"] = int(remaining / bps)
+                        info["downloaded_gb"] = downloaded / (1024 ** 3)
+
+        await loop.run_in_executor(None, _do_download)
+
+        if not info["cancelled"]:
+            if os.path.exists(dest_path):
+                os.replace(part_path, dest_path)
+            else:
+                os.rename(part_path, dest_path)
+            info["status"] = "done"
+            info["progress"] = 1.0
+
+    except Exception as exc:
+        info["status"] = "error"
+        info["error"] = str(exc)
         try:
-            for gguf in root.rglob("*.gguf"):
-                key = str(gguf).lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                try:
-                    size_gb = round(gguf.stat().st_size / 1024 ** 3, 1)
-                except OSError:
-                    size_gb = 0.0
-                stem = gguf.stem
-                alias = stem.lower()
-                for ch in ("_", ".", " "):
-                    alias = alias.replace(ch, "-")
-                models.append({
-                    "path": str(gguf),
-                    "name": gguf.name,
-                    "stem": stem,
-                    "alias": alias,
-                    "size_gb": size_gb,
-                    "folder": gguf.parent.name,
-                })
-        except (PermissionError, OSError):
-            continue
+            if os.path.exists(part_path):
+                os.remove(part_path)
+        except Exception:
+            pass
 
-    models.sort(key=lambda m: (m["folder"], m["name"]))
-    return models
+
+@app.get("/hub/download/{download_id}")
+async def hub_download_progress(download_id: str):
+    """SSE stream of download progress."""
+    if download_id not in _hub_downloads:
+        raise HTTPException(404, "Download not found")
+
+    async def _gen():
+        while True:
+            info = _hub_downloads.get(download_id)
+            if info is None:
+                break
+            payload = {
+                "status": info["status"],
+                "progress": round(info["progress"], 4),
+                "downloaded_gb": round(info["downloaded_gb"], 3),
+                "total_gb": round(info["total_gb"], 3),
+                "speed_mbps": round(info["speed_mbps"], 2),
+                "eta_s": info["eta_s"],
+                "error": info["error"],
+                "filename": info["filename"],
+                "dest_path": info["dest_path"],
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+            if info["status"] in ("done", "error", "cancelled"):
+                break
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.delete("/hub/download/{download_id}")
+async def hub_cancel_download(download_id: str):
+    """Cancel an active download."""
+    if download_id not in _hub_downloads:
+        raise HTTPException(404, "Download not found")
+    _hub_downloads[download_id]["cancelled"] = True
+    return {"status": "cancelling"}
+
+
+@app.post("/hub/apply/{download_id}")
+async def hub_apply_model(download_id: str):
+    """Apply a completed download: write .env + restart llama.cpp."""
+    if download_id not in _hub_downloads:
+        raise HTTPException(404, "Download not found")
+
+    info = _hub_downloads[download_id]
+    if info["status"] != "done":
+        raise HTTPException(400, f"Download not complete (status={info['status']})")
+
+    dest_path = info["dest_path"]
+    if not os.path.exists(dest_path):
+        raise HTTPException(400, f"File not found: {dest_path}")
+
+    # Derive alias from filename
+    stem = Path(dest_path).stem
+    new_alias = _slug_alias(stem)
+
+    # Persist to .env
+    _upsert_env_settings({
+        "LLAMACPP_MODEL_PATH": dest_path,
+        "LLAMACPP_MODEL_ALIAS": new_alias,
+    })
+
+    # Restart llama.cpp with new model
+    try:
+        await llamacpp_stop()
+        await asyncio.sleep(1.5)
+        await llamacpp_start()
+        warning = None
+    except Exception as exc:
+        warning = str(exc)
+
+    return {"status": "applied", "model_path": dest_path, "alias": new_alias, "warning": warning}
+
+
+@app.get("/hub/downloads")
+async def hub_list_downloads():
+    """List all known downloads (active + history)."""
+    return list(_hub_downloads.values())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dev / debug endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _log_path() -> Path:
+    """Path to agent_server.log next to agent_server.py."""
+    return _runtime_root_dir() / "agent_server.log"
+
+
+@app.get("/dev/log")
+async def dev_get_log(lines: int = 300):
+    """Return last N lines of agent_server.log."""
+    p = _log_path()
+    if not p.exists():
+        return {"lines": [], "path": str(p), "exists": False}
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        all_lines = text.splitlines()
+        tail = all_lines[-lines:]
+        return {"lines": tail, "path": str(p), "exists": True, "total": len(all_lines)}
+    except Exception as exc:
+        return {"lines": [], "path": str(p), "exists": True, "error": str(exc)}
+
+
+@app.get("/dev/log/stream")
+async def dev_log_stream(lines: int = 100):
+    """SSE tail of agent_server.log — polls every second for new lines."""
+    p = _log_path()
+
+    async def _gen():
+        last_size = 0
+        # Send initial tail
+        if p.exists():
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+                tail = text.splitlines()[-lines:]
+                for ln in tail:
+                    yield f"data: {json.dumps({'line': ln, 'init': True})}\n\n"
+                last_size = p.stat().st_size
+            except Exception:
+                pass
+
+        while True:
+            await asyncio.sleep(1.0)
+            if not p.exists():
+                continue
+            try:
+                size = p.stat().st_size
+                if size <= last_size:
+                    if size < last_size:  # truncated
+                        last_size = 0
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
+                all_lines = text.splitlines()
+                # Approximate: emit new lines since last read
+                prev_count = len(p.read_bytes()[:last_size].decode("utf-8", errors="replace").splitlines())
+                new_lines = all_lines[prev_count:]
+                for ln in new_lines:
+                    yield f"data: {json.dumps({'line': ln, 'init': False})}\n\n"
+                last_size = size
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/dev/traces")
+async def dev_list_traces(limit: int = 30):
+    """Return metadata for the most recent run traces."""
+    runs_dir = _runs_dir()
+    files = sorted(runs_dir.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    result = []
+    for f in files[:limit]:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            events = data.get("events") or []
+            error_events = [e for e in events if e.get("type") == "error"]
+            result.append({
+                "run_id": data.get("run_id", f.stem),
+                "conversation_id": data.get("conversation_id", ""),
+                "mode": data.get("mode", "normal"),
+                "mode_effective": data.get("mode_effective", ""),
+                "started_at": data.get("started_at", ""),
+                "finished_at": data.get("finished_at", ""),
+                "event_count": len(events),
+                "error_count": len(error_events),
+                "errors": [e.get("text", "") for e in error_events],
+                "input_preview": (data.get("input") or {}).get("message", "")[:120],
+                "timing": data.get("timing") or {},
+            })
+        except Exception:
+            continue
+    return result
+
+
+@app.get("/dev/traces/{run_id}")
+async def dev_get_trace(run_id: str):
+    """Return full trace for a run."""
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "", run_id)[:64]
+    p = _runs_dir() / f"{safe}.json"
+    if not p.exists():
+        raise HTTPException(404, "Trace not found")
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.delete("/dev/traces")
+async def dev_clear_traces():
+    """Delete all run traces."""
+    runs_dir = _runs_dir()
+    count = 0
+    for f in runs_dir.glob("*.json"):
+        try:
+            f.unlink()
+            count += 1
+        except Exception:
+            pass
+    return {"deleted": count}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3916,5 +6422,3 @@ if __name__ == "__main__":
         log_level="warning",
         access_log=False,
     )
-
-

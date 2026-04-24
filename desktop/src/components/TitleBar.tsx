@@ -116,7 +116,7 @@ export default function TitleBar({ healthStatus }: Props) {
     >
       {controlsSide === "left" ? controls : (
         <div className="flex items-center gap-1.5 text-[11px] text-muted pointer-events-none">
-          <span className="text-accent-light font-medium">{provider}</span>
+          <span className="text-secondary font-medium">{provider}</span>
           {modelAlias && (
             <>
               <span className="text-border">·</span>
@@ -140,7 +140,7 @@ export default function TitleBar({ healthStatus }: Props) {
 
       {controlsSide === "right" ? controls : (
         <div className="flex items-center gap-1.5 text-[11px] text-muted pointer-events-none">
-          <span className="text-accent-light font-medium">{provider}</span>
+          <span className="text-secondary font-medium">{provider}</span>
           {modelAlias && (
             <>
               <span className="text-border">·</span>

@@ -41,9 +41,9 @@ Esta hoja de ruta se enfoca en fortalecer **UNLZ Agent** como plataforma de agen
 
 ## Fase 6: UX Competitiva (estilo Codex/Claude)
 
-- [x] UI de “Plan Review” con alternativas, tradeoffs, camino elegido y puerta explícita de aprobación.
-- [x] “Execution Console” con timeline de pasos y estado en vivo.
-- [x] Controles de “reintentar desde este paso” y “ramificar desde aquí”.
+- [x] UI de "Plan Review" con alternativas, tradeoffs, camino elegido y puerta explícita de aprobación.
+- [x] "Execution Console" con timeline de pasos y estado en vivo.
+- [x] Controles de "reintentar desde este paso" y "ramificar desde aquí".
 - [x] Suite de benchmarks: tasa de éxito, tiempo a completar, cantidad de correcciones, eficiencia token/tool.
 
 ## Fase 7: Producción y Escalabilidad
@@ -53,3 +53,23 @@ Esta hoja de ruta se enfoca en fortalecer **UNLZ Agent** como plataforma de agen
 - [x] Telemetría estructurada (opt-in) para métricas de calidad del agente.
 - [x] Publicar ADRs (Architecture Decision Records) para decisiones clave de agente/MCP.
 
+## Fase 8: Gestión de Modelos y Experiencia de Desarrollador
+
+- [x] Catálogo de modelos con clasificación de hardware (entry/mid/high/ultra).
+- [x] Descarga con 1 clic de modelos GGUF desde HuggingFace con progreso SSE y flujo de aplicación.
+- [x] Detección automática de actualizaciones de modelo (misma familia y familia nueva).
+- [x] Controles de omitir/posponer notificaciones de actualización, persistidos entre sesiones.
+- [x] Sistema de harnesses: perfiles de modo de ejecución (native/claude-code/little-coder/opencode).
+- [x] Overrides de runtime llama.cpp por comportamiento con fallback global (el comportamiento sobrescribe `LLAMACPP_*` sólo mientras está activo).
+- [x] Modo `simple` de chat que bypasea el task router para respuestas directas más rápidas.
+- [x] Corrección de fallback de LLM para modelos sin soporte de tool-calling (auto-retry sin tools, eliminación de `tool_choice="required"`).
+- [x] Dev Mode: tail en vivo del log del servidor + navegador de trazas de ejecución, activado desde configuración.
+
+## Fase 9: Próximas Funciones
+
+- [ ] Soporte de fine-tuning o adaptadores LoRA para tareas de dominio específico.
+- [ ] Entrada multimodal (imagen/documento) en chat via builds multimodales de llama.cpp.
+- [ ] Tareas de agente programadas/recurrentes (estilo cron).
+- [ ] Modo agente remoto: exponer API del agente en LAN/internet con autenticación.
+- [ ] Sistema de plugins para herramientas personalizadas sin cambios en el backend.
+- [ ] App móvil complementaria (Tauri mobile o PWA).

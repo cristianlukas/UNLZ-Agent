@@ -81,6 +81,10 @@ También muestra selector de idioma (Español/English) y usa `icon.ico` como íc
   - botón `Instalar/Actualizar llama.cpp` que instala o actualiza automáticamente y autoconfigura rutas base
   - ubicación por defecto: `<directorio de instalación>/llama.cpp` (modelos: `<directorio de instalación>/llama.cpp/models`)
   - botón `↻` para reanalizar si aparece un modelo nuevo con la app abierta
+- **Overrides llama.cpp por comportamiento**:
+  - en `Comportamientos`, cada perfil puede sobrescribir args de runtime (`context size`, `-ngl`, `flash attn`, `cache K/V`, `extra args`)
+  - esos valores aplican sólo mientras ese comportamiento esté activo
+  - la `Configuración` global sigue siendo la base por defecto
 - **Modo Plan**: botón en chat (afecta primer envío)
 - **Modo Iterador**: ejecución por etapas con validación
 - **Carpetas**:
