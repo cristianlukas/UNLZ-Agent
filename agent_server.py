@@ -496,8 +496,18 @@ def _opencode_bin() -> str:
     configured = (os.getenv("HARNESS_OPENCODE_BIN") or getattr(Config, "HARNESS_OPENCODE_BIN", "") or "").strip()
     if configured and Path(configured).exists():
         return configured
-    detected = _which_any(["opencode", "opencode.cmd", "opencode.exe"])
+    # Prefer .cmd/.exe on Windows; `opencode` can resolve to a PowerShell script wrapper
+    # that is slower/less reliable under subprocess streaming.
+    detected = _which_any(["opencode.cmd", "opencode.exe", "opencode"])
     if detected:
+        try:
+            p = Path(detected)
+            if p.suffix.lower() == ".ps1":
+                sibling_cmd = p.with_suffix(".cmd")
+                if sibling_cmd.exists():
+                    return str(sibling_cmd)
+        except Exception:
+            pass
         return detected
     # npm global bin on Windows (often not in PATH for packaged apps)
     appdata = os.getenv("APPDATA", "")
@@ -2701,6 +2711,11 @@ def _compose_system_prompt(system_prompt: str = "", harness_override: str = "") 
     return base_prompt
 
 
+def _effective_harness(harness_override: str = "") -> str:
+    h = (harness_override or getattr(Config, "AGENT_HARNESS", "native") or "native").strip().lower()
+    return h if h in _HARNESS_PROMPTS else "native"
+
+
 def _simple_chat_system_prompt() -> str:
     lang = (Config.AGENT_LANGUAGE or "es").strip().lower()
     if lang == "es":
@@ -2711,6 +2726,193 @@ def _simple_chat_system_prompt() -> str:
     if lang == "zh":
         return "你是一个聊天助手。请简短自然地回答（1-2句），不要调用工具。"
     return "You are a chat assistant. Reply briefly and naturally in 1-2 sentences. Do not call tools."
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text or "")
+
+
+def _opencode_build_prompt(
+    message: str,
+    history: list[dict[str, Any]],
+    system_prompt: str = "",
+    harness_override: str = "",
+    mode: str = "normal",
+    internet_enabled: bool = True,
+    tools_mode: str = "auto",
+) -> str:
+    base_system = _compose_system_prompt(system_prompt, harness_override)
+    hist_lines: list[str] = []
+    for h in history[-12:]:
+        role = str(h.get("role") or "").strip().lower()
+        content = str(h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            hist_lines.append(f"{role}: {content}")
+    mode_label = (mode or "normal").strip().lower()
+    tool_policy = (
+        "no_tools" if tools_mode == "without_tools"
+        else ("tools_required" if tools_mode == "with_tools" else "tools_auto")
+    )
+    internet_policy = "internet_enabled" if internet_enabled else "internet_disabled"
+    parts = [
+        f"[SYSTEM]\n{base_system}",
+        f"[SESSION]\nmode={mode_label}\n{tool_policy}\n{internet_policy}",
+    ]
+    if hist_lines:
+        parts.append("[HISTORY]\n" + "\n".join(hist_lines))
+    parts.append(f"[USER]\n{message}")
+    parts.append("[INSTRUCTIONS]\nRespond in Markdown. Be concrete and concise.")
+    return "\n\n".join(parts)
+
+
+async def _opencode_stream(
+    message: str,
+    history: list[dict[str, Any]],
+    system_prompt: str = "",
+    model_override: str = "",
+    harness_override: str = "",
+    folder_id: str = "",
+    sandbox_root: str = "",
+    mode: str = "normal",
+    internet_enabled: bool = True,
+    tools_mode: str = "auto",
+    cancel_event: Optional[asyncio.Event] = None,
+) -> AsyncGenerator[str, None]:
+    bin_path = _opencode_bin()
+    if not bin_path:
+        yield f"data: {json.dumps({'type': 'error', 'text': 'Harness opencode no instalado o no encontrado en PATH. Instalá con: npm i -g opencode-ai'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+
+    root_dir = str(_runtime_root_dir())
+    workdir = str(Path(sandbox_root).resolve()) if (sandbox_root or "").strip() else root_dir
+    if not os.path.isdir(workdir):
+        workdir = root_dir
+
+    # Build a minimal prompt for opencode. Opencode has its own system prompting
+    # and Claude/cloud model intelligence — don't prepend the full UNLZ system prompt
+    # (extra tokens slow response and confuse the model). Only inject the user's
+    # custom behavior prompt if it's non-empty and meaningful.
+    _custom_sys = (system_prompt or "").strip()
+    _hist_parts: list[str] = []
+    for h in history[-6:]:  # last 6 turns is enough for context
+        role = str(h.get("role") or "").strip().lower()
+        content = str(h.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            _hist_parts.append(f"{role}: {content}")
+    _hist_block = "\n\n".join(_hist_parts)
+
+    if _custom_sys and _hist_block:
+        prompt = f"[SYSTEM]\n{_custom_sys}\n\n[HISTORY]\n{_hist_block}\n\n[USER]\n{message}"
+    elif _custom_sys:
+        prompt = f"[SYSTEM]\n{_custom_sys}\n\n[USER]\n{message}"
+    elif _hist_block:
+        prompt = f"{_hist_block}\n\nuser: {message}"
+    else:
+        prompt = message
+
+    # Windows CreateProcess limit ~32767 chars total. Guard prompt length.
+    _MAX_PROMPT = 8000
+    if len(prompt) > _MAX_PROMPT:
+        prompt = prompt[:_MAX_PROMPT] + "\n\n[...contexto truncado por longitud...]"
+
+    args = [bin_path, "run", "--dir", workdir]
+
+    # Only forward model_override if it looks like an opencode-compatible cloud model ID
+    # (contains "/" like "anthropic/claude-3-5-sonnet"). Local llama.cpp names are meaningless
+    # to opencode and would cause an error.
+    mo = (model_override or "").strip()
+    if mo and "/" in mo:
+        args.extend(["--model", mo])
+
+    # Respect explicit permission mode; autonomous → skip interactive permission prompts.
+    exec_mode = (getattr(Config, "AGENT_EXECUTION_MODE", "confirm") or "confirm").strip().lower()
+    if exec_mode != "confirm":
+        args.append("--dangerously-skip-permissions")
+
+    args.append(prompt)
+
+    effective_model = mo if (mo and "/" in mo) else "(opencode config)"
+    yield f"data: {json.dumps({'type': 'step', 'text': 'opencode.run', 'args': {'cwd': workdir, 'model': effective_model}})}\n\n"
+
+    # Suppress ANSI/color codes that opencode emits in terminal-detection mode.
+    env = os.environ.copy()
+    env["NO_COLOR"] = "1"
+    env["TERM"] = "dumb"
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=workdir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except Exception as e:
+        yield f"data: {json.dumps({'type': 'error', 'text': f'No se pudo iniciar opencode: {e}'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+
+    emitted = False
+
+    # readline()-based loop: yields each line as soon as opencode writes it.
+    # No artificial polling delay (was 0.05s sleep + 0.12s timeout = ~170ms/chunk).
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    if proc.returncode is None:
+                        _kill_pid_tree(proc.pid)
+                except Exception:
+                    pass
+                yield f"data: {json.dumps({'type': 'error', 'text': 'Ejecución cancelada por el usuario.'})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+
+            try:
+                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=120.0)
+            except asyncio.TimeoutError:
+                # 120s without any output line — likely hung.
+                yield f"data: {json.dumps({'type': 'error', 'text': 'opencode timeout (120s sin respuesta).'})}\n\n"
+                break
+
+            if not raw:
+                # EOF — opencode finished.
+                break
+
+            line = _strip_ansi(raw.decode("utf-8", errors="ignore"))
+            if line.strip():
+                emitted = True
+                yield f"data: {json.dumps({'type': 'chunk', 'text': line})}\n\n"
+
+    finally:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        try:
+            if proc.returncode is None:
+                _kill_pid_tree(proc.pid)
+        except Exception:
+            pass
+
+    if not emitted:
+        # Try to surface stderr as the error message.
+        try:
+            stderr_raw = await asyncio.wait_for(proc.stderr.read(4096), timeout=3.0)
+            stderr_text = _strip_ansi(stderr_raw.decode("utf-8", errors="ignore")).strip() if stderr_raw else ""
+        except (asyncio.TimeoutError, Exception):
+            stderr_text = ""
+        err_msg = (
+            f"opencode error: {stderr_text[:500]}" if stderr_text
+            else "opencode no devolvió salida (empty completion)."
+        )
+        yield f"data: {json.dumps({'type': 'error', 'text': err_msg})}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
 def _simple_chat_extra_body(model_name: str) -> dict[str, Any]:
@@ -4158,8 +4360,32 @@ async def _agent_stream(
         requested_tools_mode = str(tools_mode or "auto").strip().lower()
         if requested_tools_mode not in ("auto", "with_tools", "without_tools"):
             requested_tools_mode = "auto"
+        effective_harness = _effective_harness(harness_override)
         depth_route = "detailed"
         depth_reason = "depth_router_default"
+
+        # External harness path: opencode runtime.
+        # Keep plan mode on native stream because it depends on UNLZ plan cards flow.
+        if effective_harness == "opencode" and m in ("normal", "simple", "iterate"):
+            trace["mode_effective"] = f"opencode_{m}"
+            async for ev in _stream_and_trace(
+                _opencode_stream(
+                    message,
+                    history,
+                    system_prompt=system_prompt,
+                    model_override=model_override,
+                    harness_override=harness_override,
+                    folder_id=folder_id,
+                    sandbox_root=sandbox_root,
+                    mode=m,
+                    internet_enabled=internet_enabled,
+                    tools_mode=requested_tools_mode,
+                    cancel_event=cancel_event,
+                )
+            ):
+                yield ev
+            return
+
         # Compute effective path first.
         # In normal mode we delegate quick-vs-detailed routing to a tiny LLM router.
         effective_simple = (m == "simple")
