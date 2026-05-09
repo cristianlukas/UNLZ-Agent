@@ -2,16 +2,13 @@ import { useState, useRef } from "react";
 import {
   Plus,
   MessageSquare,
-  BookOpen,
   FolderClosed,
-  Activity,
   Settings,
   Trash2,
   Pencil,
   Check,
   X,
   Brain,
-  Sparkles,
   Terminal,
 } from "lucide-react";
 import { useStore } from "../lib/store";
@@ -186,9 +183,6 @@ function FolderGroup({
 const BOTTOM_NAV: { id: View; icon: React.ReactNode; label: string }[] = [
   { id: "folders",   icon: <FolderClosed size={16} />, label: "Carpetas"        },
   { id: "behaviors", icon: <Brain size={16} />,        label: "Comportamientos" },
-  { id: "knowledge", icon: <BookOpen size={16} />,     label: "Documentos"      },
-  { id: "hub",       icon: <Sparkles size={16} />,     label: "Modelos"         },
-  { id: "system",    icon: <Activity size={16} />,     label: "Sistema"         },
   { id: "settings",  icon: <Settings size={16} />,     label: "Configuración"   },
 ];
 
@@ -200,16 +194,8 @@ export default function ConversationSidebar() {
     folders,
     conversations, activeConvId,
     createConversation, deleteConversation, renameConversation, setActiveConv,
-    hubUpdateNotification, skippedHubModelIds, snoozedHubUntil,
     devMode,
   } = useStore();
-
-  const hasHubUpdate = (() => {
-    if (!hubUpdateNotification) return false;
-    const isSnoozed = snoozedHubUntil !== null && Date.now() < snoozedHubUntil;
-    const isSkipped = skippedHubModelIds.includes(hubUpdateNotification.recommended.id);
-    return !isSnoozed && !isSkipped;
-  })();
   const ungrouped = sortConversations(conversations.filter((c) => !c.folderId));
   const byFolder = folders.map((f) => ({
     folder: f,
@@ -228,15 +214,17 @@ export default function ConversationSidebar() {
   return (
     <aside className="conv-sidebar flex flex-col bg-surface border-r border-border shrink-0">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3 border-b border-border">
-        <span className="text-xs font-semibold text-muted uppercase tracking-wider">Chats</span>
-        <button
-          onClick={handleNew}
-          className="p-1 rounded-md text-muted hover:text-primary hover:bg-raised transition-colors"
-          title="Nueva conversación"
-        >
-          <Plus size={15} />
-        </button>
+      <div className="px-3 py-3 border-b border-border space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-muted uppercase tracking-wider">Chats</span>
+          <button
+            onClick={handleNew}
+            className="p-1 rounded-md text-muted hover:text-primary hover:bg-raised transition-colors"
+            title="Nueva conversación"
+          >
+            <Plus size={15} />
+          </button>
+        </div>
       </div>
 
       {/* Conversation list */}
@@ -314,9 +302,6 @@ export default function ConversationSidebar() {
           >
             <span className="relative">
               {item.icon}
-              {item.id === "hub" && hasHubUpdate && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_4px_rgba(251,191,36,0.7)]" />
-              )}
             </span>
             <span className="font-medium">{item.label}</span>
           </button>

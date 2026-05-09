@@ -1,0 +1,87 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.env
+
+# MCP
+mcp.json
+
+# Logs
+*.log
+logs/
+
+# Desktop/Tauri artifacts
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/.tauri/
+
+# Local installed/managed tool artifacts (dev)
+tools/
+tmp/
+temp/
+
+# Build outputs
+dist-single-exe/
+dist-portable/
+*.spec
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local runtime / cache
+agent_server.log
+*.pid
+data/task_router.json
+data/router_metrics.jsonl
+data/telemetry.jsonl
+data/memory.jsonl
+data/runs/
+data/snapshots/
+data/folders/
+data/.unlz_internal/
+data/local_behaviors.json
+
+# Keep only source assets under desktop/src/assets
+desktop/src/assets/*.tmp
+desktop/src/assets/*.bak
+!desktop/src/lib/
+!desktop/src/lib/**
+dist-single-exe/UNLZ-Agent-Setup.exe
+desktop/src-tauri/binaries/agent_server.exe
+.claude/worktrees/gracious-einstein-90c379/
+UNLZ Agent_0.1.0_x64-setup.exe
+UNLZ-Agent-Setup.exe

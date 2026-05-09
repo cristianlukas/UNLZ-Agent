@@ -31,7 +31,11 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": ["binaries/agent_server.exe", "icons/icon.ico"],
+    "resources": [
+      "binaries/agent_server.exe",
+      "icons/icon.ico",
+      "binaries/llama.cpp"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "offlineInstaller",

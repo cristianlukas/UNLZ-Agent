@@ -2,8 +2,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 #[cfg(debug_assertions)]
 use std::process::Stdio;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use tauri::menu::MenuBuilder;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -12,6 +16,106 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 
 pub struct AgentState(pub Mutex<Option<Child>>);
 static ALLOW_EXIT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let mut cmd = Command::new("taskkill");
+    cmd.arg("/PID")
+        .arg(pid.to_string())
+        .arg("/T")
+        .arg("/F");
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd.output();
+}
+
+fn request_backend_llamacpp_stop() {
+    // Best-effort local HTTP call to stop llama.cpp gracefully before killing agent.
+    // This avoids orphan llama-server processes when the app exits abruptly.
+    let req = b"POST /llamacpp/stop HTTP/1.1\r\nHost: 127.0.0.1:7719\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+    if let Ok(mut s) = TcpStream::connect("127.0.0.1:7719") {
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(900)));
+        let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(900)));
+        let _ = s.write_all(req);
+        let mut buf = [0u8; 512];
+        let _ = s.read(&mut buf);
+    }
+}
+
+fn request_backend_endpoint(path: &str) {
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: 127.0.0.1:7719\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        path
+    );
+    if let Ok(mut s) = TcpStream::connect("127.0.0.1:7719") {
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(900)));
+        let _ = s.set_write_timeout(Some(std::time::Duration::from_millis(900)));
+        let _ = s.write_all(req.as_bytes());
+        let mut buf = [0u8; 512];
+        let _ = s.read(&mut buf);
+    }
+}
+
+fn append_shutdown_log(message: &str) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!("[tray-exit] ts={} {}\n", ts, message);
+    let path = runtime_root_dir().join("agent_server.log");
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(windows)]
+fn force_kill_unlz_processes(root: &PathBuf) {
+    let root_esc = root.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        r#"$ErrorActionPreference='SilentlyContinue';
+$root = '{0}';
+$procs = Get-CimInstance Win32_Process | Where-Object {{
+  ($_.Name -match '^(python|agent_server|llama-server|mcp_server)(\.exe)?$') -and (
+    ($_.CommandLine -like ('*' + $root + '*agent_server.py*')) -or
+    ($_.CommandLine -like ('*' + $root + '*mcp_server.py*')) -or
+    ($_.ExecutablePath -like ('*' + $root + '*agent_server.exe')) -or
+    ($_.ExecutablePath -like ('*' + $root + '*llama-server.exe'))
+  )
+}};
+foreach($p in $procs) {{ Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue; }}"#,
+        root_esc
+    );
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(script);
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let _ = cmd.output();
+}
+
+#[cfg(not(windows))]
+fn force_kill_unlz_processes(_root: &PathBuf) {}
+
+#[cfg(not(windows))]
+fn kill_process_tree(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let _ = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .output();
+}
 
 // ─── Path helpers ─────────────────────────────────────────────────────────────
 
@@ -314,7 +418,8 @@ fn restart_agent(state: tauri::State<AgentState>) -> String {
     let mut guard = state.0.lock().unwrap();
 
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
+        let pid = child.id();
+        kill_process_tree(pid);
         let _ = child.wait();
     }
 
@@ -332,7 +437,8 @@ fn restart_agent(state: tauri::State<AgentState>) -> String {
 fn stop_agent(state: tauri::State<AgentState>) -> String {
     let mut guard = state.0.lock().unwrap();
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
+        let pid = child.id();
+        kill_process_tree(pid);
         let _ = child.wait();
         "stopped".to_string()
     } else {
@@ -387,6 +493,9 @@ pub fn run() {
                         }
                         "quit" => {
                             ALLOW_EXIT.store(true, Ordering::SeqCst);
+                            append_shutdown_log("Tray quit requested. Starting shutdown cleanup.");
+                            request_backend_endpoint("/system/mcp/stop");
+                            request_backend_llamacpp_stop();
                             app.exit(0);
                         }
                         _ => {}
@@ -431,13 +540,20 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
+                    append_shutdown_log("RunEvent::Exit entered. Stopping MCP and llama.cpp.");
+                    request_backend_endpoint("/system/mcp/stop");
+                    request_backend_llamacpp_stop();
                     let state = app_handle.state::<AgentState>();
                     let mut guard = state.0.lock().unwrap();
                     if let Some(mut child) = guard.take() {
                         println!("[unlz] Killing agent server…");
-                        let _ = child.kill();
+                        let pid = child.id();
+                        kill_process_tree(pid);
                         let _ = child.wait();
                     }
+                    append_shutdown_log("Primary child process terminated. Running forced cleanup.");
+                    force_kill_unlz_processes(&runtime_root_dir());
+                    append_shutdown_log("Tray quit: shutdown cleanup completed.");
                 }
                 _ => {}
             }

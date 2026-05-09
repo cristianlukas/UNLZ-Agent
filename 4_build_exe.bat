@@ -15,6 +15,7 @@ if not exist "%PYTHON%" (
 
 set "DESKTOP=%ROOT%desktop"
 set "BIN_DIR=%DESKTOP%\src-tauri\binaries"
+set "LLAMA_BIN_DIR=%BIN_DIR%\llama.cpp"
 set "OUT_DIR=%ROOT%dist-single-exe"
 set "ROOT_SETUP=%ROOT%UNLZ-Agent-Setup.exe"
 set "AGENT_SCRIPT=%ROOT%agent_server.py"
@@ -33,6 +34,23 @@ if errorlevel 1 (
 )
 
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+
+set "LLAMA_SOURCE=%ROOT%tools\llama.cpp\b8902"
+if defined UNLZ_LLAMA_BUNDLE_SOURCE set "LLAMA_SOURCE=%UNLZ_LLAMA_BUNDLE_SOURCE%"
+if not exist "%LLAMA_SOURCE%\llama-server.exe" (
+  echo [ERROR] llama.cpp source invalid: "%LLAMA_SOURCE%"
+  echo         Set UNLZ_LLAMA_BUNDLE_SOURCE to a folder that contains llama-server.exe
+  exit /b 1
+)
+
+echo ==> Syncing bundled llama.cpp runtime
+if exist "%LLAMA_BIN_DIR%" rmdir /s /q "%LLAMA_BIN_DIR%"
+mkdir "%LLAMA_BIN_DIR%"
+robocopy "%LLAMA_SOURCE%" "%LLAMA_BIN_DIR%" /E /NFL /NDL /NJH /NJS /NC /NS >nul
+if errorlevel 8 (
+  echo [ERROR] Failed to copy llama.cpp runtime.
+  exit /b 1
+)
 
 echo ==> Building backend sidecar (agent_server.exe)
 "%PYTHON%" -m PyInstaller "%AGENT_SCRIPT%" --onefile --name agent_server --distpath "%BIN_DIR%" --workpath "%ROOT%build\_pyinstaller" --specpath "%ROOT%build\_pyinstaller" --noconfirm --log-level WARN
@@ -78,4 +96,3 @@ echo   %ROOT_SETUP%
 echo.
 echo Users only need this one EXE installer.
 exit /b 0
-

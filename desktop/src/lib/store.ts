@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Behavior, ChatMessage, Conversation, Folder, HubUpdateNotification, View } from "./types";
+import type { Behavior, ChatMessage, Conversation, Folder, UiMode, View } from "./types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,11 +22,10 @@ const DEFAULT_BEHAVIORS: Behavior[] = [
     name: "Asistente UNLZ",
     icon: "🎓",
     content: `Eres un asistente inteligente de la Universidad Nacional de Lomas de Zamora (UNLZ).
-Tenés acceso a herramientas: búsqueda de conocimiento local (RAG), búsqueda web, hora, stats del sistema.
-Usá las herramientas proactivamente para responder con precisión.
+Ayudá al usuario con sus tareas usando las herramientas disponibles de opencode.
 Formateá las respuestas en Markdown. Sé conciso y preciso.`,
     model: "",
-    harness: "",
+    harness: "opencode",
     defaultInternetEnabled: true,
     defaultToolsMode: "auto",
     createdAt: 0,
@@ -41,7 +40,7 @@ Respondé siempre con código limpio, bien comentado y con explicaciones concisa
 Preferí TypeScript, Python o Rust según el contexto.
 Formateá el código con bloques de código con el lenguaje indicado.`,
     model: "",
-    harness: "claude-code",
+    harness: "opencode",
     defaultInternetEnabled: true,
     defaultToolsMode: "auto",
     createdAt: 0,
@@ -52,95 +51,22 @@ Formateá el código con bloques de código con el lenguaje indicado.`,
     name: "Investigación",
     icon: "🔬",
     content: `Eres un asistente de investigación académica.
-Antes de responder, buscá en la base de conocimiento local y en la web.
-Citá fuentes cuando sea posible. Sé exhaustivo pero organizado.
+Buscá información y citá fuentes cuando sea posible. Sé exhaustivo pero organizado.
 Usá encabezados Markdown para estructurar respuestas largas.`,
     model: "",
-    harness: "",
+    harness: "opencode",
     defaultInternetEnabled: true,
     defaultToolsMode: "auto",
     createdAt: 0,
     updatedAt: 0,
   },
-  {
-    id: "default-chat-gemma",
-    name: "Charla",
-    icon: "💬",
-    content: `Sos un asistente conversacional natural y cálido, optimizado para charla general en español.
-Priorizá respuestas directas, claras y fluidas.
-En preguntas simples, respondé sin usar herramientas.
-Usá herramientas solo si el usuario pide explícitamente investigar, buscar datos actuales o verificar información.
-Mantené coherencia de contexto y evitá repeticiones innecesarias.`,
-    model: "gemma-4-31b-it-q4_k_m",
-    harness: "",
-    defaultInternetEnabled: true,
-    defaultToolsMode: "without_tools",
-    createdAt: 0,
-    updatedAt: 0,
-  },
-  {
-    id: "default-vision",
-    name: "Visión",
-    icon: "👁️",
-    content: `Sos un asistente experto en análisis visual y OCR con Gemma 4 Vision.
-Objetivo: extraer texto, tablas y detalles visuales finos de imágenes/documentos.
-Reglas:
-- Priorizá precisión literal en OCR (nombres, números, fechas, IDs, montos).
-- Si el texto es ambiguo o borroso, indicá fragmentos dudosos explícitamente.
-- Para documentos largos, devolvé salida estructurada: resumen + campos clave + texto extraído.
-- Evitá inventar datos no visibles en la imagen.
-- Cuando corresponda, proponé una segunda pasada enfocada en zonas críticas.`,
-    model: "gemma-4-31b-it-q4_k_m",
-    harness: "",
-    defaultInternetEnabled: true,
-    defaultToolsMode: "with_tools",
-    createdAt: 0,
-    updatedAt: 0,
-  },
 ];
-
-function normalizeBehaviorRecord(b: Behavior): Behavior {
-  const normalizedToolsMode =
-    b.defaultToolsMode === "with_tools" || b.defaultToolsMode === "without_tools" || b.defaultToolsMode === "auto"
-      ? b.defaultToolsMode
-      : "auto";
-  const baseBehavior: Behavior = {
-    ...b,
-    harness: (b.harness || "").trim(),
-    defaultInternetEnabled:
-      typeof b.defaultInternetEnabled === "boolean" ? b.defaultInternetEnabled : true,
-    defaultToolsMode: normalizedToolsMode,
-  };
-  const isHeretic = /heretic/i.test(String(b.id || "")) || /heretic/i.test(String(b.name || ""));
-  if (b.id === "default-chat-gemma") {
-    return {
-      ...baseBehavior,
-      name: b.name?.trim() ? b.name : "Charla",
-      model: (b.model || "").trim() || "gemma-4-31b-it-q4_k_m",
-      defaultToolsMode: normalizedToolsMode === "auto" ? "without_tools" : normalizedToolsMode,
-    };
-  }
-  if (b.id === "default-dev") {
-    return {
-      ...baseBehavior,
-      harness: (b.harness || "").trim() || "claude-code",
-    };
-  }
-  if (isHeretic) {
-    return {
-      ...baseBehavior,
-      defaultInternetEnabled: false,
-    };
-  }
-  return baseBehavior;
-}
 
 function mergeDefaultBehaviors(existing?: Behavior[]): Behavior[] {
   const current = existing ? [...existing] : [];
-  const normalized = current.map((b) => normalizeBehaviorRecord(b));
-  const existingIds = new Set(normalized.map((b) => b.id));
+  const existingIds = new Set(current.map((b) => b.id));
   const missingDefaults = DEFAULT_BEHAVIORS.filter((b) => !existingIds.has(b.id));
-  return [...normalized, ...missingDefaults];
+  return [...current, ...missingDefaults];
 }
 
 // ─── Store types ──────────────────────────────────────────────────────────────
@@ -186,8 +112,7 @@ interface AppStore {
     model?: string,
     harness?: string,
     defaultInternetEnabled?: boolean,
-    defaultToolsMode?: Behavior["defaultToolsMode"],
-    llamacpp?: Behavior["llamacpp"]
+    defaultToolsMode?: Behavior["defaultToolsMode"]
   ) => string;
   updateBehavior: (id: string, updates: Partial<Omit<Behavior, "id" | "createdAt">>) => void;
   deleteBehavior: (id: string) => void;
@@ -203,14 +128,13 @@ interface AppStore {
   devMode: boolean;
   setDevMode: (v: boolean) => void;
 
-  // Hub — update notifications (partially persisted)
-  hubUpdateNotification: HubUpdateNotification | null;
-  setHubUpdateNotification: (n: HubUpdateNotification | null) => void;
-  skippedHubModelIds: string[];          // persisted: never show again for this model
-  snoozedHubUntil: number | null;        // persisted: snooze timestamp
-  skipHubModel: (modelId: string) => void;
-  snoozeHubUpdate: (ms?: number) => void; // default 24 h
-  clearHubSnooze: () => void;
+  // Newbie UX
+  uiMode: UiMode;
+  setUiMode: (v: UiMode) => void;
+  onboardingCompleted: boolean;
+  setOnboardingCompleted: (v: boolean) => void;
+  newbieProfile: Record<string, unknown>;
+  setNewbieProfile: (p: Record<string, unknown>) => void;
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -235,12 +159,7 @@ export const useStore = create<AppStore>()(
       setProviderInfo: (provider, modelAlias) => set({ provider, modelAlias }),
       pendingDraftByConv: {},
       setPendingDraft: (convId, text) =>
-        set((s) => ({
-          pendingDraftByConv: {
-            ...s.pendingDraftByConv,
-            [convId]: text,
-          },
-        })),
+        set((s) => ({ pendingDraftByConv: { ...s.pendingDraftByConv, [convId]: text } })),
       consumePendingDraft: (convId) => {
         const current = get().pendingDraftByConv[convId] ?? "";
         set((s) => {
@@ -266,20 +185,14 @@ export const useStore = create<AppStore>()(
           behaviorId,
           folderId,
         };
-        set((s) => ({
-          conversations: [conv, ...s.conversations],
-          activeConvId: id,
-          view: "chat",
-        }));
+        set((s) => ({ conversations: [conv, ...s.conversations], activeConvId: id, view: "chat" }));
         return id;
       },
 
       deleteConversation: (id) =>
         set((s) => {
           const remaining = s.conversations.filter((c) => c.id !== id);
-          const nextId = s.activeConvId === id
-            ? (remaining[0]?.id ?? null)
-            : s.activeConvId;
+          const nextId = s.activeConvId === id ? (remaining[0]?.id ?? null) : s.activeConvId;
           return { conversations: remaining, activeConvId: nextId };
         }),
 
@@ -304,10 +217,7 @@ export const useStore = create<AppStore>()(
           conversations: s.conversations.map((c) => {
             if (c.id !== convId) return c;
             const updated = { ...c, messages: [...c.messages, ...messages], updatedAt: Date.now() };
-            // Auto-title from first user message
-            if (updated.title === "Nueva conversación") {
-              updated.title = autoTitle(updated.messages);
-            }
+            if (updated.title === "Nueva conversación") updated.title = autoTitle(updated.messages);
             return updated;
           }),
         })),
@@ -321,9 +231,7 @@ export const useStore = create<AppStore>()(
               ? c.messages.map((m) => (m.id === msg.id ? msg : m))
               : [...c.messages, msg];
             const updated = { ...c, messages, updatedAt: Date.now() };
-            if (updated.title === "Nueva conversación") {
-              updated.title = autoTitle(updated.messages);
-            }
+            if (updated.title === "Nueva conversación") updated.title = autoTitle(updated.messages);
             return updated;
           }),
         })),
@@ -340,34 +248,13 @@ export const useStore = create<AppStore>()(
       // ── Behaviors ────────────────────────────────────────────────────────────
       behaviors: DEFAULT_BEHAVIORS,
 
-      createBehavior: (
-        name,
-        content,
-        icon,
-        model,
-        harness,
-        defaultInternetEnabled = true,
-        defaultToolsMode = "auto",
-        llamacpp
-      ) => {
+      createBehavior: (name, content, icon, model, harness, defaultInternetEnabled = true, defaultToolsMode = "auto") => {
         const id = uid();
         const now = Date.now();
         set((s) => ({
           behaviors: [
             ...s.behaviors,
-            {
-              id,
-              name,
-              content,
-              icon,
-              model,
-              harness,
-              defaultInternetEnabled,
-              defaultToolsMode,
-              llamacpp,
-              createdAt: now,
-              updatedAt: now,
-            },
+            { id, name, content, icon, model, harness, defaultInternetEnabled, defaultToolsMode, createdAt: now, updatedAt: now },
           ],
         }));
         return id;
@@ -383,7 +270,6 @@ export const useStore = create<AppStore>()(
       deleteBehavior: (id) =>
         set((s) => ({
           behaviors: s.behaviors.filter((b) => b.id !== id),
-          // Clear behaviorId from any conversations using it
           conversations: s.conversations.map((c) =>
             c.behaviorId === id ? { ...c, behaviorId: undefined } : c
           ),
@@ -399,8 +285,7 @@ export const useStore = create<AppStore>()(
           for (const it of items) {
             if (!it?.id) continue;
             const prev = byId.get(it.id);
-            const merged = prev ? ({ ...prev, ...it } as Behavior) : (it as Behavior);
-            byId.set(it.id, normalizeBehaviorRecord(merged));
+            byId.set(it.id, prev ? { ...prev, ...it } as Behavior : it as Behavior);
           }
           return { behaviors: Array.from(byId.values()) };
         }),
@@ -411,17 +296,7 @@ export const useStore = create<AppStore>()(
       createFolder: (name) => {
         const id = uid();
         const now = Date.now();
-        set((s) => ({
-          folders: [
-            {
-              id,
-              name,
-              createdAt: now,
-              updatedAt: now,
-            },
-            ...s.folders,
-          ],
-        }));
+        set((s) => ({ folders: [{ id, name, createdAt: now, updatedAt: now }, ...s.folders] }));
         return id;
       },
 
@@ -444,34 +319,26 @@ export const useStore = create<AppStore>()(
       devMode: false,
       setDevMode: (v) => set({ devMode: v }),
 
-      // ── Hub ──────────────────────────────────────────────────────────────────
-      hubUpdateNotification: null,
-      setHubUpdateNotification: (n) => set({ hubUpdateNotification: n }),
-      skippedHubModelIds: [],
-      snoozedHubUntil: null,
-      skipHubModel: (modelId) =>
-        set((s) => ({
-          skippedHubModelIds: s.skippedHubModelIds.includes(modelId)
-            ? s.skippedHubModelIds
-            : [...s.skippedHubModelIds, modelId],
-        })),
-      snoozeHubUpdate: (ms = 24 * 60 * 60 * 1000) =>
-        set({ snoozedHubUntil: Date.now() + ms }),
-      clearHubSnooze: () =>
-        set({ snoozedHubUntil: null }),
+      // ── Newbie UX ────────────────────────────────────────────────────────────
+      uiMode: "simple",
+      setUiMode: (v) => set({ uiMode: v }),
+      onboardingCompleted: false,
+      setOnboardingCompleted: (v) => set({ onboardingCompleted: v }),
+      newbieProfile: { language: "es", experience_level: "newbie", detail_level: "simple" },
+      setNewbieProfile: (p) => set((s) => ({ newbieProfile: { ...s.newbieProfile, ...(p || {}) } })),
     }),
     {
-      name: "unlz-agent-store",
-      // Don't persist runtime state
+      name: "unlz-agent2-store",
       partialize: (s) => ({
         view: s.view,
         conversations: s.conversations,
         activeConvId: s.activeConvId,
         behaviors: s.behaviors,
         folders: s.folders,
-        skippedHubModelIds: s.skippedHubModelIds,
-        snoozedHubUntil: s.snoozedHubUntil,
         devMode: s.devMode,
+        uiMode: s.uiMode,
+        onboardingCompleted: s.onboardingCompleted,
+        newbieProfile: s.newbieProfile,
       }),
       merge: (persisted, current) => {
         const p = (persisted as Partial<AppStore>) || {};

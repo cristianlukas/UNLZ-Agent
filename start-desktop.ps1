@@ -75,6 +75,23 @@ if (-not (Test-Path $nodeModules)) {
 $env:UNLZ_PROJECT_ROOT = $Root
 $env:UNLZ_PYTHON = $venvPython
 
+# Ensure bundled llama.cpp runtime exists for Tauri resource glob.
+$tauriLlamaDir = Join-Path $Root "desktop\src-tauri\binaries\llama.cpp"
+if (-not (Test-Path $tauriLlamaDir)) {
+    New-Item -ItemType Directory -Path $tauriLlamaDir -Force | Out-Null
+}
+$hasLlamaFiles = (Get-ChildItem -Path $tauriLlamaDir -File -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+if (-not $hasLlamaFiles) {
+    $llamaSource = Join-Path $Root "tools\llama.cpp\b8902"
+    if (Test-Path (Join-Path $llamaSource "llama-server.exe")) {
+        Write-Host "Syncing bundled llama.cpp runtime for dev..." -ForegroundColor Yellow
+        robocopy $llamaSource $tauriLlamaDir /E /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+    } else {
+        # Keep one placeholder so tauri resource glob binaries/llama.cpp/** always matches.
+        Set-Content -Path (Join-Path $tauriLlamaDir ".keep") -Value "placeholder" -Encoding ascii
+    }
+}
+
 # Helpers
 function Get-ListeningPidsByPort {
     param([int]$Port)

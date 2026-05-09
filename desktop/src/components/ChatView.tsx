@@ -4,7 +4,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { cancelRun, getSettings, runApprovedWindowsCommand, saveSettings, streamChat, uploadFolderFile } from "../lib/api";
+import { cancelRun, getBootstrapStatus, getSettings, getTaskTemplates, runApprovedWindowsCommand, saveSettings, streamChat, uploadFolderFile } from "../lib/api";
+import type { TaskTemplate } from "../lib/types";
 import type { AgentStep, ChatMessage } from "../lib/types";
 import { useStore, useActiveConv, useActiveBehavior, useActiveFolder } from "../lib/store";
 import unlzLogo from "../assets/unlz-logo.png";
@@ -16,6 +17,19 @@ type StreamPhase = "sending" | "routing" | "tools" | "generating";
 type ResponseDepthHint = "quick" | "detailed" | null;
 type AgentMode = "auto" | "iterate" | "simple";
 type ToolsUsageMode = "auto" | "with_tools" | "without_tools";
+
+function mapStepToUserHint(stepText: string): string | null {
+  const t = String(stepText || "").trim().toLowerCase();
+  if (!t) return null;
+  if (t === "opencode.args") return "Preparando entorno del agente…";
+  if (t === "opencode.run") return "Iniciando ejecución del agente…";
+  if (t.startsWith("task_router")) return "Analizando tu pedido y eligiendo estrategia…";
+  if (t.includes("web_search")) return "Buscando información en internet…";
+  if (t.includes("search_folder_documents") || t.includes("search_local_knowledge")) return "Revisando documentos y contexto…";
+  if (t.includes("run_windows_command")) return "Ejecutando acción local…";
+  if (t.includes("command_confirmation_required")) return "Esperando confirmación para ejecutar comando…";
+  return null;
+}
 
 // ─── Tool step ────────────────────────────────────────────────────────────────
 
@@ -793,6 +807,8 @@ function ActiveChat({ convId }: { convId: string }) {
   const conv = useStore((s) => s.conversations.find((c) => c.id === convId));
   const behavior = useActiveBehavior();
   const activeFolder = useActiveFolder();
+  const uiMode = useStore((s) => s.uiMode);
+  const newbieProfile = useStore((s) => s.newbieProfile);
 
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -811,6 +827,12 @@ function ActiveChat({ convId }: { convId: string }) {
   const [activeSendMode, setActiveSendMode] = useState<SendMode>("normal");
   const [internetEnabled, setInternetEnabled] = useState(true);
   const [toolsUsageMode, setToolsUsageMode] = useState<ToolsUsageMode>("auto");
+  const [streamHint, setStreamHint] = useState<string>("");
+  const [bootstrapHint, setBootstrapHint] = useState<string>("");
+  const [bootstrapProgress, setBootstrapProgress] = useState<number | null>(null);
+  const [bootstrapTransferHint, setBootstrapTransferHint] = useState<string>("");
+  const [timeline, setTimeline] = useState<string>("");
+  const [templates, setTemplates] = useState<TaskTemplate[]>([]);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -831,9 +853,10 @@ function ActiveChat({ convId }: { convId: string }) {
   const lockMessage = !agentReady
     ? "Iniciando agente…"
     : !llmReady
-      ? "Cargando modelo…"
+      ? (bootstrapHint || "Cargando modelo…")
       : uiStreaming
         ? (
+            streamHint || (
             streamPhase === "routing"
               ? (
                   activeSendMode === "plan"
@@ -846,9 +869,10 @@ function ActiveChat({ convId }: { convId: string }) {
                 )
               : streamPhase === "tools"
                 ? "Ejecutando herramientas…"
-                : streamPhase === "generating"
-                  ? "Generando respuesta…"
-                  : "Enviando consulta…"
+              : streamPhase === "generating"
+                ? "Generando respuesta…"
+                : "Enviando consulta…"
+            )
           )
         : "";
 
@@ -892,19 +916,6 @@ function ActiveChat({ convId }: { convId: string }) {
     return "";
   }
 
-  function buildLlamacppOverrides(): Record<string, unknown> {
-    const src = behavior?.llamacpp
-      ?? (activeFolder?.behaviorId ? behaviors.find((b) => b.id === activeFolder.behaviorId)?.llamacpp : undefined);
-    if (!src) return {};
-    const out: Record<string, unknown> = {};
-    if (typeof src.contextSize === "number" && Number.isFinite(src.contextSize)) out.context_size = src.contextSize;
-    if (typeof src.gpuLayers === "number" && Number.isFinite(src.gpuLayers)) out.n_gpu_layers = src.gpuLayers;
-    if (typeof src.flashAttn === "boolean") out.flash_attn = src.flashAttn;
-    if ((src.cacheTypeK || "").trim()) out.cache_type_k = String(src.cacheTypeK).trim();
-    if ((src.cacheTypeV || "").trim()) out.cache_type_v = String(src.cacheTypeV).trim();
-    if ((src.extraArgs || "").trim()) out.extra_args = String(src.extraArgs).trim();
-    return out;
-  }
 
   function resolveBehaviorDefaults(): { internetEnabled: boolean; toolsMode: ToolsUsageMode } {
     const fromConvBehavior = behavior;
@@ -926,10 +937,9 @@ function ActiveChat({ convId }: { convId: string }) {
 
   const effectiveHarness = (buildHarnessOverride() || globalHarness || "native").trim().toLowerCase();
   const harnessToggleSupport = {
-    // UX: toggles are always visible regardless of active harness.
     plan: true,
     agentModeSelector: true,
-    executionMode: true,
+    executionMode: false,
   };
 
   const scrollToBottom = useCallback((smooth = true) => {
@@ -971,18 +981,75 @@ function ActiveChat({ convId }: { convId: string }) {
     getSettings()
       .then((cfg) => {
         if (cancelled) return;
-        const harness = String(cfg.AGENT_HARNESS ?? "native").trim().toLowerCase();
-        const mode = String(cfg.AGENT_EXECUTION_MODE ?? "confirm").trim().toLowerCase();
-        setAutonomousExec(mode === "autonomous");
-        setGlobalHarness(harness || "native");
+        const harness = String(cfg.AGENT_HARNESS ?? "opencode").trim().toLowerCase();
+        const mode = String(cfg.AGENT_EXECUTION_MODE ?? "autonomous").trim().toLowerCase();
+        setAutonomousExec(mode !== "confirm");
+        setGlobalHarness(harness || "opencode");
       })
       .catch(() => {
         if (!cancelled) {
-          setAutonomousExec(false);
-          setGlobalHarness("native");
+          setAutonomousExec(true);
+          setGlobalHarness("opencode");
         }
       });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getTaskTemplates()
+      .then((rows) => { if (!cancelled) setTemplates(rows || []); })
+      .catch(() => { if (!cancelled) setTemplates([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let stop = false;
+    let timer: number | null = null;
+    async function tick() {
+      const st = await getBootstrapStatus();
+      if (stop || !st) return;
+      const detail = String(st.detail || "").trim();
+      if (st.status === "downloading") {
+        setBootstrapHint(detail || "Descargando modelo inicial…");
+        const p = typeof st.progress === "number" ? Math.max(0, Math.min(1, st.progress)) : null;
+        setBootstrapProgress(p);
+        const mb = typeof st.downloaded_mb === "number" ? st.downloaded_mb : null;
+        const total = typeof st.total_mb === "number" ? st.total_mb : null;
+        const speed = typeof st.speed_mbps === "number" ? st.speed_mbps : null;
+        const parts: string[] = [];
+        if (mb !== null && total !== null) parts.push(`${mb.toFixed(1)} / ${total.toFixed(1)} MB`);
+        else if (mb !== null) parts.push(`${mb.toFixed(1)} MB`);
+        if (speed !== null) parts.push(`${speed.toFixed(2)} MB/s`);
+        setBootstrapTransferHint(parts.join(" · "));
+      } else if (st.status === "running") {
+        setBootstrapHint(detail || "Inicializando runtime del modelo…");
+        setBootstrapProgress(null);
+        setBootstrapTransferHint("");
+      } else if (st.status === "ready") {
+        setBootstrapHint("");
+        setBootstrapProgress(null);
+        setBootstrapTransferHint("");
+      } else if (st.status === "warning") {
+        setBootstrapHint(detail || "Ajustando configuración del modelo…");
+        setBootstrapProgress(null);
+        setBootstrapTransferHint("");
+      } else if (st.status === "error") {
+        setBootstrapHint(detail || "Error al preparar modelo local.");
+        setBootstrapProgress(null);
+        setBootstrapTransferHint("");
+      } else {
+        setBootstrapHint("");
+        setBootstrapProgress(null);
+        setBootstrapTransferHint("");
+      }
+    }
+    void tick();
+    timer = window.setInterval(() => { void tick(); }, 3000);
+    return () => {
+      stop = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1073,6 +1140,8 @@ function ActiveChat({ convId }: { convId: string }) {
     const expectedSimple = mode === "simple";
     setActiveSendMode(mode);
     setResponseDepthHint(null);
+    setStreamHint("Preparando consulta…");
+    setTimeline("Analizando tu pedido");
     setStreamPhase(expectedSimple ? "generating" : "sending");
     setIsStreaming(true);
     setTimeout(() => scrollToBottom(false), 0);
@@ -1087,7 +1156,7 @@ function ActiveChat({ convId }: { convId: string }) {
         buildSystemPrompt(),
         buildModelOverride(),
         buildHarnessOverride(),
-        buildLlamacppOverrides(),
+        {},
         conv?.folderId,
         activeFolder?.sandboxPath,
         mode,
@@ -1095,10 +1164,12 @@ function ActiveChat({ convId }: { convId: string }) {
         false,
         internetEnabled,
         toolsUsageMode,
+        newbieProfile,
         abortCtrl.signal
       )) {
         if (event.type === "run") {
           currentRunIdRef.current = event.run_id;
+          setStreamHint("Sesión iniciada. Preparando respuesta…");
           setStreamPhase(expectedSimple ? "generating" : "routing");
           const current = useStore
             .getState()
@@ -1110,6 +1181,8 @@ function ActiveChat({ convId }: { convId: string }) {
             pending: true,
           });
         } else if (event.type === "step") {
+          const hint = mapStepToUserHint(event.text || "");
+          if (hint) setStreamHint(hint);
           if ((event.text || "") === "response.depth_router") {
             const route = String((event.args as Record<string, unknown> | undefined)?.route || "").toLowerCase();
             if (route === "quick" || route === "detailed") {
@@ -1137,7 +1210,10 @@ function ActiveChat({ convId }: { convId: string }) {
               { tool: event.text, args: event.args as Record<string, unknown> | undefined },
             ],
           });
+        } else if (event.type === "timeline") {
+          setTimeline(event.label || "");
         } else if (event.type === "chunk") {
+          if (streamHint) setStreamHint("");
           setStreamPhase("generating");
           const current = useStore
             .getState()
@@ -1159,6 +1235,16 @@ function ActiveChat({ convId }: { convId: string }) {
             pending: true,
           });
         } else if (event.type === "error") {
+          setStreamHint("");
+          const details = [
+            event.human_message ? `Qué pasó: ${event.human_message}` : "",
+            Array.isArray(event.common_causes) && event.common_causes.length > 0
+              ? `Posibles causas:\n- ${event.common_causes.join("\n- ")}`
+              : "",
+            Array.isArray(event.fix_steps) && event.fix_steps.length > 0
+              ? `Cómo resolverlo:\n1. ${event.fix_steps.join("\n1. ")}`
+              : "",
+          ].filter(Boolean).join("\n\n");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -1166,11 +1252,14 @@ function ActiveChat({ convId }: { convId: string }) {
           upsertMessage(convId, {
             ...(current ?? assistantMsg),
             content: event.text,
+            technicalDetails: details || undefined,
             error: true,
             pending: false,
           });
           break;
         } else if (event.type === "done") {
+          setStreamHint("");
+          setTimeline("Finalizado");
           const current = useStore
             .getState()
             .conversations.find((c) => c.id === convId)
@@ -1212,6 +1301,7 @@ function ActiveChat({ convId }: { convId: string }) {
       });
     } finally {
       setIsStreaming(false);
+      setStreamHint("");
       setStreamPhase("sending");
       setResponseDepthHint(null);
       setActiveSendMode("normal");
@@ -1739,10 +1829,44 @@ function ActiveChat({ convId }: { convId: string }) {
         {uiLocked && (
           <div className="mb-2 rounded-lg border border-border bg-raised px-3 py-2 text-xs text-primary">
             {lockMessage}
+            {bootstrapProgress !== null && !llmReady && (
+              <div className="mt-2">
+                <div className="h-2 w-full rounded bg-base border border-border overflow-hidden">
+                  <div
+                    className="h-full bg-accent transition-all duration-300"
+                    style={{ width: `${Math.round(bootstrapProgress * 100)}%` }}
+                  />
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
+                  <span>{Math.round(bootstrapProgress * 100)}%</span>
+                  <span>{bootstrapTransferHint || "Descargando…"}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {timeline && uiStreaming && (
+          <div className="mb-2 rounded-lg border border-border bg-raised px-3 py-2 text-xs text-secondary">
+            {timeline}
+          </div>
+        )}
+        {templates.length > 0 && messages.length === 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {templates.slice(0, 4).map((tpl) => (
+              <button
+                key={tpl.id}
+                disabled={uiLocked}
+                onClick={() => setInput(tpl.prompt_template)}
+                className="text-[11px] px-2 py-1 rounded-md border border-border bg-raised text-muted hover:text-primary"
+                title={tpl.description}
+              >
+                {tpl.title}
+              </button>
+            ))}
           </div>
         )}
         <div className="flex items-center gap-2 mb-2">
-          {harnessToggleSupport.plan && (
+          {uiMode === "advanced" && harnessToggleSupport.plan && (
             <button
               onClick={togglePlanMode}
               aria-pressed={planArmed}
@@ -1757,7 +1881,7 @@ function ActiveChat({ convId }: { convId: string }) {
               Modo Plan
             </button>
           )}
-          {harnessToggleSupport.agentModeSelector && (
+          {uiMode === "advanced" && harnessToggleSupport.agentModeSelector && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-muted">Modo de agente</span>
               <select
@@ -1786,6 +1910,7 @@ function ActiveChat({ convId }: { convId: string }) {
           >
             Modo internet {internetEnabled ? "on" : "off"}
           </button>
+          {uiMode === "advanced" && (
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-muted">Uso de herramientas</span>
             <select
@@ -1800,7 +1925,8 @@ function ActiveChat({ convId }: { convId: string }) {
               <option value="without_tools">Sin herramientas</option>
             </select>
           </div>
-          {harnessToggleSupport.executionMode && (
+          )}
+          {uiMode === "advanced" && harnessToggleSupport.executionMode && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-muted">Ejecución</span>
               <select

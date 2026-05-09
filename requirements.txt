@@ -1,22 +1,6 @@
-mcp>=1.2.0
 psutil
-# RAG Dependencies
-langchain
-langchain-community
-langchain-ollama
-langchain-chroma
-chromadb
-supabase
-pypdf
-tiktoken
 python-dotenv
-duckduckgo-search
-ddgs
-googlesearch-python
-# Guardrails
-pydantic
-# Agent server (replaces n8n)
 fastapi>=0.110.0
 uvicorn[standard]
-openai>=1.0.0
+pydantic
 python-multipart

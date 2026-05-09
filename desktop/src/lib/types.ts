@@ -1,6 +1,6 @@
 // ─── Navigation ───────────────────────────────────────────────────────────────
 
-export type View = "chat" | "behaviors" | "knowledge" | "folders" | "system" | "settings" | "hub" | "devlog";
+export type View = "chat" | "behaviors" | "folders" | "settings" | "devlog";
 
 // ─── Agent / Chat ─────────────────────────────────────────────────────────────
 
@@ -27,21 +27,13 @@ export interface ChatMessage {
 export interface Behavior {
   id: string;
   name: string;
-  content: string;      // Markdown / plain text — the system prompt
-  icon?: string;        // emoji shorthand
-  model?: string;       // optional model alias/id override for this behavior
-  harness?: string;     // optional harness override for this behavior
-  defaultInternetEnabled?: boolean; // per-behavior default for internet tool usage
-  defaultToolsMode?: "auto" | "with_tools" | "without_tools"; // per-behavior default tool policy
-  llamacpp?: {
-    contextSize?: number;
-    gpuLayers?: number;
-    flashAttn?: boolean;
-    cacheTypeK?: string;
-    cacheTypeV?: string;
-    extraArgs?: string;
-  };
-  localOnly?: boolean;  // local machine profile (not meant for sync/repo)
+  content: string;
+  icon?: string;
+  model?: string;
+  harness?: string;
+  defaultInternetEnabled?: boolean;
+  defaultToolsMode?: "auto" | "with_tools" | "without_tools";
+  localOnly?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -54,7 +46,7 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
-  behaviorId?: string;  // linked behavior (system prompt)
+  behaviorId?: string;
   folderId?: string;
 }
 
@@ -81,145 +73,25 @@ export interface HealthResponse {
   components: Record<string, HealthComponent>;
 }
 
-// ─── Knowledge base ───────────────────────────────────────────────────────────
+export type UiMode = "simple" | "advanced";
 
-export interface KbFile {
-  name: string;
-  size: number;
-  modified: number;
-}
-
-// ─── System stats ─────────────────────────────────────────────────────────────
-
-export interface SystemStats {
-  cpu_percent: number;
-  ram_total_gb: number;
-  ram_used_gb: number;
-  ram_percent: number;
-  vram_total_gb?: number;
-  vram_used_gb?: number;
-  vram_percent?: number;
-  gpus?: Array<{
-    name: string;
-    total_gb: number;
-    used_gb: number;
-    percent: number;
-  }>;
-  disk_total_gb: number;
-  disk_used_gb: number;
-  disk_percent: number;
-  disks?: Array<{
-    name: string;
-    mountpoint: string;
-    total_gb: number;
-    used_gb: number;
-    percent: number;
-  }>;
-}
-
-// ─── Model Hub ────────────────────────────────────────────────────────────────
-
-export interface HubModelTasks {
-  chat: number;
-  code: number;
-  reasoning: number;
-  instruct: number;
-}
-
-export interface HubModel {
+export interface OnboardingCheck {
   id: string;
-  family: string;
   name: string;
-  version: string;
-  size_label: string;
-  hf_repo: string;
-  filename: string;
-  quant: string;
-  vram_gb: number;
-  ram_gb: number;
-  file_gb: number;
-  context: number;
-  tier: "entry" | "mid" | "high" | "ultra";
-  tasks: HubModelTasks;
-  license: string;
-  release: string;
-  recommended_for: string[];
-  badge: "new" | "recommended" | "popular" | null;
+  status: "ok" | "warning" | "error";
+  details: string;
+  action: string;
 }
 
-export interface HardwareProfile {
-  vram_gb: number;
-  ram_gb: number;
-  tier: "entry" | "mid" | "high" | "ultra";
+export interface OnboardingStatus {
+  status: "ready" | "needs_attention";
+  checks: OnboardingCheck[];
+  first_prompt_examples: string[];
 }
 
-export interface HubRecommendations {
-  tier: string;
-  ideal: HubModel | null;
-  balanced: HubModel | null;
-  fast: HubModel | null;
-  all_fitting: HubModel[];
-}
-
-export interface HubCatalogResponse {
-  hardware: HardwareProfile;
-  catalog: HubModel[];
-  recommendations: HubRecommendations;
-}
-
-export interface HubUpdateNotification {
-  type: "family_upgrade" | "same_family_upgrade" | "catalog_suggestion";
-  current_family: string;
-  new_family?: string;
-  current_entry?: HubModel;
-  recommended: HubModel;
-  message: string;
-}
-
-export interface HubDownload {
+export interface TaskTemplate {
   id: string;
-  url: string;
-  hf_repo: string;
-  filename: string;
-  dest_path: string;
-  status: "starting" | "downloading" | "done" | "error" | "cancelled";
-  progress: number;
-  downloaded_gb: number;
-  total_gb: number;
-  speed_mbps: number;
-  eta_s: number;
-  error: string | null;
-}
-
-export interface HubSearchFile {
-  filename: string;
-  size_gb: number | null;
-  quant: string;
-}
-
-export interface HubSearchResult {
-  repo: string;
   title: string;
-  downloads: number;
-  likes: number;
-  updated_at: string;
-  gguf_count: number;
-  recommended_filename: string | null;
-  files: HubSearchFile[];
-}
-
-export interface HubSearchResponse {
-  query: string;
-  results: HubSearchResult[];
-}
-
-// ─── llama.cpp status ─────────────────────────────────────────────────────────
-
-export interface LlamacppStatus {
-  running: boolean;
-  managed: boolean;
-  pid: number | null;
-  url: string;
-  model: string;
-  alias: string;
+  description: string;
+  prompt_template: string;
 }
