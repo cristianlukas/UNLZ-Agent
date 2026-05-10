@@ -425,6 +425,22 @@ def classify_hardware(vram_gb: float, ram_gb: float) -> str:
 
 
 def _avg_score(m: dict) -> float:
+    """Compute the mean task score for a model catalog entry.
+
+    Purpose:
+        Produces a single ranking metric from task-specific scores.
+
+    Parameters:
+        m (dict): Model entry containing `tasks.chat`, `tasks.code`,
+        `tasks.reasoning`, and `tasks.instruct`.
+
+    Returns:
+        float: Arithmetic mean of the four task scores.
+
+    Raises:
+        KeyError: If expected task keys are missing.
+        TypeError: If task values are not numeric.
+    """
     t = m["tasks"]
     return (t["chat"] + t["code"] + t["reasoning"] + t["instruct"]) / 4.0
 
@@ -544,12 +560,43 @@ _ONLINE_CACHE: dict[str, Any] = {"ts": 0.0, "catalog": None, "meta": None}
 
 
 def _http_json(url: str, timeout: float = 6.0) -> Any:
+    """Fetch and decode a JSON document from an HTTP endpoint.
+
+    Purpose:
+        Centralizes remote JSON retrieval for online model-hint providers.
+
+    Parameters:
+        url (str): Endpoint URL to request.
+        timeout (float, optional): Maximum wait time in seconds.
+
+    Returns:
+        Any: Parsed JSON payload.
+
+    Raises:
+        urllib.error.URLError: Network connectivity or DNS failures.
+        TimeoutError: If the request exceeds the timeout.
+        json.JSONDecodeError: If the response body is not valid JSON.
+    """
     req = Request(url, headers={"User-Agent": "UNLZ-Agent/2.0", "Accept": "application/json"})
     with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="ignore"))
 
 
 def _extract_size_label(text: str) -> str | None:
+    """Extract a model-size label from free-form text.
+
+    Purpose:
+        Detects labels such as `7B` or `35B-A3B` from repository/model names.
+
+    Parameters:
+        text (str): Input text potentially containing size patterns.
+
+    Returns:
+        str | None: Normalized size label when found, otherwise `None`.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     m = re.search(r"(\d+(?:\.\d+)?)\s*(b|B)(?:[-_ ]?(A\d+B))?", text)
     if not m:
         return None
@@ -559,6 +606,23 @@ def _extract_size_label(text: str) -> str | None:
 
 
 def _fetch_huggingface_hints() -> dict[str, Any]:
+    """Collect catalog hint candidates from Hugging Face search endpoints.
+
+    Purpose:
+        Queries multiple search terms and extracts matching GGUF model IDs plus
+        optional `lastModified` metadata for ranking/enrichment.
+
+    Parameters:
+        None.
+
+    Returns:
+        dict[str, Any]: Source metadata with discovered model IDs and
+        last-modified timestamps.
+
+    Raises:
+        This function catches provider/network errors internally and returns a
+        best-effort result.
+    """
     queries = ["Qwen3.6 GGUF", "Gemma 4 GGUF", "Qwen3.6-35B-A3B-GGUF"]
     found_ids: list[str] = []
     last_modified: dict[str, str] = {}
@@ -584,6 +648,22 @@ def _fetch_huggingface_hints() -> dict[str, Any]:
 
 
 def _fetch_openrouter_hints() -> dict[str, Any]:
+    """Collect catalog hint candidates from OpenRouter model listings.
+
+    Purpose:
+        Fetches OpenRouter model IDs and filters for target families used by
+        runtime catalog enrichment.
+
+    Parameters:
+        None.
+
+    Returns:
+        dict[str, Any]: Source metadata with discovered model IDs.
+
+    Raises:
+        This function catches provider/network errors internally and returns a
+        best-effort result.
+    """
     found_ids: list[str] = []
     try:
         data = _http_json("https://openrouter.ai/api/v1/models", timeout=5.0) or {}
@@ -602,6 +682,23 @@ def _fetch_openrouter_hints() -> dict[str, Any]:
 
 
 def _merge_online_hints(base_catalog: list[dict[str, Any]], hints: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Merge online provider hints into a static base catalog.
+
+    Purpose:
+        Applies deterministic enrichment rules (for example injecting missing
+        families or boosting visibility flags) based on online discovery data.
+
+    Parameters:
+        base_catalog (list[dict[str, Any]]): Local static catalog.
+        hints (list[dict[str, Any]]): Online hint payloads from providers.
+
+    Returns:
+        tuple[list[dict[str, Any]], dict[str, Any]]: Updated catalog and
+        metadata describing applied enrichment actions.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     catalog = deepcopy(base_catalog)
     meta: dict[str, Any] = {"sources": hints, "applied": []}
 

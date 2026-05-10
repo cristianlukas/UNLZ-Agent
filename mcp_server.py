@@ -17,7 +17,21 @@ _llamacpp_proc: subprocess.Popen | None = None
 
 @mcp.tool()
 def get_system_stats() -> dict:
-    """Get current system hardware statistics (CPU, RAM, simulated GPU)."""
+    """Return current host resource metrics exposed through MCP.
+
+    Purpose:
+        Provides lightweight CPU/RAM telemetry and a placeholder GPU payload for
+        diagnostics inside tool-calling flows.
+
+    Parameters:
+        None.
+
+    Returns:
+        dict: CPU usage, RAM totals/availability, and GPU metrics.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     cpu_percent = psutil.cpu_percent(interval=0.1)
     memory = psutil.virtual_memory()
 
@@ -39,7 +53,17 @@ def get_system_stats() -> dict:
 
 @mcp.tool()
 def check_query_safety(query: str) -> dict:
-    """Validate if a user query is safe to process (Guardrails)."""
+    """Validate query safety using project guardrails.
+
+    Parameters:
+        query (str): Raw user query text.
+
+    Returns:
+        dict: Guardrail validation result (`valid` flag and details).
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     return validate_input(query)
 
 
@@ -49,7 +73,14 @@ from rag_pipeline.retriever import search_documents
 
 @mcp.tool()
 def trigger_rag_ingestion() -> str:
-    """Trigger RAG ingestion: reads PDFs from data/, chunks them, stores in vector DB."""
+    """Run the RAG ingestion pipeline and return execution status text.
+
+    Returns:
+        str: Success message or error description.
+
+    Raises:
+        This function catches runtime errors internally and returns them as text.
+    """
     try:
         ingest_documents()
         return "RAG Ingestion completed successfully."
@@ -59,7 +90,17 @@ def trigger_rag_ingestion() -> str:
 
 @mcp.tool()
 def search_local_knowledge(query: str) -> list[dict]:
-    """Search the local knowledge base (RAG) for relevant document chunks."""
+    """Search the local RAG index for relevant document chunks.
+
+    Parameters:
+        query (str): User search query.
+
+    Returns:
+        list[dict]: Retrieved chunk payloads and metadata.
+
+    Raises:
+        Exception: Propagates retrieval-layer failures.
+    """
     return search_documents(query)
 
 
@@ -69,7 +110,18 @@ from datetime import datetime
 
 @mcp.tool()
 def web_search(query: str, max_results: int = 3) -> list[dict]:
-    """Search the internet via DuckDuckGo for current information."""
+    """Run a DuckDuckGo web search for current external information.
+
+    Parameters:
+        query (str): Search query string.
+        max_results (int, optional): Maximum result count to request.
+
+    Returns:
+        list[dict]: Search result rows or error payloads.
+
+    Raises:
+        This function catches provider/network errors internally.
+    """
     try:
         results = DDGS().text(query, max_results=max_results)
         return results if results else [{"error": "No results found."}]
@@ -79,13 +131,21 @@ def web_search(query: str, max_results: int = 3) -> list[dict]:
 
 @mcp.tool()
 def get_current_time() -> str:
-    """Get the current local date and time."""
+    """Return the current local timestamp as formatted text.
+
+    Returns:
+        str: Datetime formatted as `%Y-%m-%d %H:%M:%S`.
+    """
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 @mcp.tool()
 def list_knowledge_base_files() -> list[str]:
-    """List files in the UNLZ AI Studio data directory."""
+    """List files available in the connected UNLZ AI Studio data directory.
+
+    Returns:
+        list[str]: File names or error text when directory access fails.
+    """
     if not os.path.exists(STUDIO_DATA_PATH):
         return [f"Error: Directory not found at {STUDIO_DATA_PATH}"]
     try:
@@ -97,7 +157,18 @@ def list_knowledge_base_files() -> list[str]:
 
 @mcp.tool()
 def read_studio_file(filename: str) -> str:
-    """Read a file from the UNLZ AI Studio data directory."""
+    """Read a text file from the UNLZ AI Studio data directory.
+
+    Parameters:
+        filename (str): Requested file name. Path traversal is prevented by
+        basename sanitization.
+
+    Returns:
+        str: File contents or error message.
+
+    Raises:
+        This function catches file I/O errors internally.
+    """
     safe_filename = os.path.basename(filename)
     file_path = os.path.join(STUDIO_DATA_PATH, safe_filename)
     if not os.path.exists(file_path):
@@ -112,7 +183,11 @@ def read_studio_file(filename: str) -> str:
 # ─── llama.cpp process management ───────────────────────────────────────────
 
 def _build_llamacpp_args() -> list[str]:
-    """Build the argument list for llama-server from Config."""
+    """Build `llama-server` CLI arguments from current configuration.
+
+    Returns:
+        list[str]: Ordered command arguments ready for `subprocess.Popen`.
+    """
     args = [
         Config.LLAMACPP_EXECUTABLE,
         "-m", Config.LLAMACPP_MODEL_PATH,
@@ -135,7 +210,15 @@ def _build_llamacpp_args() -> list[str]:
 
 @mcp.tool()
 def start_llamacpp_server() -> dict:
-    """Start the llama.cpp server using settings from config. Returns status and pid."""
+    """Start a managed llama.cpp server process using configured settings.
+
+    Returns:
+        dict: Start status, PID, and base URL on success or error details.
+
+    Raises:
+        This function catches startup failures internally and returns error
+        payloads instead of re-raising.
+    """
     global _llamacpp_proc
 
     if not Config.LLAMACPP_EXECUTABLE:
@@ -170,7 +253,14 @@ def start_llamacpp_server() -> dict:
 
 @mcp.tool()
 def stop_llamacpp_server() -> dict:
-    """Stop the llama.cpp server if it was started by this MCP server."""
+    """Stop the managed llama.cpp process if currently running.
+
+    Returns:
+        dict: Stop status payload.
+
+    Raises:
+        subprocess.TimeoutExpired: Internally handled by force-kill fallback.
+    """
     global _llamacpp_proc
 
     if _llamacpp_proc is None:
@@ -191,7 +281,14 @@ def stop_llamacpp_server() -> dict:
 
 @mcp.tool()
 def get_llamacpp_status() -> dict:
-    """Check if the llama.cpp server is running and return its config."""
+    """Probe llama.cpp health endpoint and return runtime status details.
+
+    Returns:
+        dict: Running state, managed PID, endpoint, and key model settings.
+
+    Raises:
+        This function suppresses health-check HTTP errors.
+    """
     import urllib.request
 
     base_url = f"http://{Config.LLAMACPP_HOST}:{Config.LLAMACPP_PORT}"
@@ -216,9 +313,23 @@ def get_llamacpp_status() -> dict:
 
 @mcp.tool()
 def direct_chat(message: str, use_rag: bool = True, system_prompt: str = "") -> dict:
-    """
-    Chat directly with the configured LLM (llamacpp/ollama/openai) bypassing n8n.
-    Optionally enriches the prompt with local RAG context.
+    """Run a direct chat completion against the configured LLM provider.
+
+    Purpose:
+        Bypasses n8n and calls the provider-compatible `/chat/completions`
+        endpoint directly, optionally augmenting context with local RAG chunks.
+
+    Parameters:
+        message (str): User prompt.
+        use_rag (bool, optional): Whether to inject local retrieval context.
+        system_prompt (str, optional): Custom system prompt override.
+
+    Returns:
+        dict: Success payload with model response or error payload with provider.
+
+    Raises:
+        This function catches network/provider errors internally and returns
+        structured failure payloads.
     """
     import urllib.request
     import json

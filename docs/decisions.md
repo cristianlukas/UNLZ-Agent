@@ -1,74 +1,81 @@
 # Decisions — UNLZ Agent
 
-> Registro de decisiones técnicas relevantes.
+> Registro de decisiones técnicas relevantes. Última actualización: 2026-05-02.
 
-## D001 — Desktop recomendado sobre Legacy Frontend
+## D001 — Opencode-only architecture
+- **Fecha**: 2026-05-02
+- **Contexto**: El proyecto tenía multi-provider (ollama, llamacpp, openai) y multi-harness (native, little-coder, claude-code, opencode)
+- **Decisión**: Simplificar a opencode-only con llamacpp como backend
+- **Razón**: Reducir complejidad, mantener un solo flujo de ejecución verificable, eliminar deuda técnica de múltiples paths
+- **Impacto**: agent_server.py reducido de ~8765 a ~2154 líneas, config.py simplificado, desktop views reducidas
+- **Estado**: Activa
+
+## D002 — Bootstrap automático de runtime
+- **Fecha**: 2026-05-02
+- **Contexto**: El usuario debía configurar manualmente llama.cpp, modelo, y opencode
+- **Decisión**: Auto-detectar hardware, seleccionar modelo por bucket VRAM, descargar desde HuggingFace, generar config opencode
+- **Razón**: Mejorar experiencia de primer uso, reducir fricción de configuración
+- **Estado**: Activa
+
+## D003 — Home directory aislado para opencode
+- **Fecha**: 2026-05-02
+- **Contexto**: opencode usaba el home del usuario, lo que podía interferir con config global
+- **Decisión**: Forzar HOME, USERPROFILE, XDG_CONFIG_HOME a `data/.unlz_internal/opencode_home/`
+- **Razón**: Aislar config de opencode del usuario, evitar conflictos con instalación global
+- **Estado**: Activa
+
+## D004 — Error explanation para humanos
+- **Fecha**: 2026-05-02
+- **Contexto**: Los errores técnicos de opencode/llama.cpp eran ilegibles para usuarios no técnicos
+- **Decisión**: `explain_error_for_humans()` traduce errores a mensajes con causas comunes y pasos de fix
+- **Razón**: Mejorar experiencia de usuario, especialmente en modo newbie
+- **Estado**: Activa
+
+## D005 — Newbie UX con onboarding
+- **Fecha**: 2026-05-02
+- **Contexto**: El proyecto no tenía sistema de onboarding ni perfil de usuario
+- **Decisión**: Modal de onboarding con checks de salud, perfil de usuario (experience_level, detail_level, language), task templates
+- **Razón**: Guiar al usuario en primer uso, inyectar hints de perfil en prompts para adaptaciones
+- **Estado**: Activa
+
+## D006 — Desktop recomendado sobre Legacy Frontend
 - **Fecha**: 2026-04-27
 - **Contexto**: El proyecto tiene dos UIs: desktop/ (Tauri+React) y frontend/ (Next.js)
 - **Decisión**: Nuevo trabajo debe ir en desktop/. frontend/ marcado como legacy.
-- **Razón**: Tauri ofrece menor footprint, acceso nativo a filesystem, mejor integración con sistema. Next.js legacy usa arquitectura diferente y no se mantiene activamente.
+- **Razón**: Tauri ofrece menor footprint, acceso nativo a filesystem, mejor integración con sistema
 - **Estado**: Activa
 
-## D002 — Backend en archivo único
+## D007 — Backend en archivo único
 - **Fecha**: 2026-04-27
-- **Contexto**: agent_server.py tiene ~7200 líneas en un solo archivo
-- **Decisión**: Mantener monolito por ahora, refactorizar cuando sea necesario
-- **Razón**: El archivo funciona bien para el tamaño actual. Separarlo prematuramente agregaría complejidad de imports y deployment. Se recomienda refactorizar por bloques cuando supere 10000 líneas o múltiples responsabilidades claramente separables.
+- **Contexto**: agent_server.py tenía ~8765 líneas, ahora ~2154 tras refactor a opencode-only
+- **Decisión**: Mantener monolito por ahora. Tamaño actual manejable
+- **Razón**: El archivo funciona bien para ~2154 líneas. Separarlo prematuramente agregaría complejidad
 - **Estado**: Activa
 
-## D003 — LLM Provider por defecto: llamacpp
+## D008 — Desktop recomendado sobre Legacy Frontend
 - **Fecha**: 2026-04-27
-- **Contexto**: config.py tiene LLM_PROVIDER con default llamacpp
-- **Decisión**: Mantener llamacpp como default, soportar ollama y openai como alternativas
-- **Razón**: llama.cpp permite ejecutar modelos locales sin servidor externo. Ollama requiere proceso separado. OpenAI requiere conexión cloud.
+- **Contexto**: El proyecto tiene dos UIs: desktop/ (Tauri+React) y frontend/ (Next.js)
+- **Decisión**: Nuevo trabajo debe ir en desktop/. frontend/ marcado como legacy.
+- **Razón**: Tauri ofrece menor footprint, acceso nativo a filesystem, mejor integración con sistema
 - **Estado**: Activa
 
-## D004 — Vector DB por defecto: ChromaDB local
+## D009 — Data files en directorio data/
 - **Fecha**: 2026-04-27
-- **Contexto**: config.py tiene VECTOR_DB con default chroma
-- **Decisión**: Mantener ChromaDB local como default, soportar Supabase como alternativa cloud
-- **Razón**: ChromaDB funciona 100% offline, ideal para asistente local. Supabase requiere infraestructura cloud.
-- **Estado**: Activa
-
-## D005 — Advanced Mode gated
-- **Fecha**: 2026-04-27
-- **Contexto**: Se añadieron 6 feature groups avanzados (profiles, benchmarks, presets, hardware detection, launch history, health monitoring)
-- **Decisión**: Todos los features avanzados requieren UNLZ_ADVANCED_MODE=1 en .env
-- **Razón**: Estos features agregan complejidad y endpoints adicionales que no son necesarios para uso básico. El flag permite activarlos solo cuando se necesitan.
-- **Estado**: Activa
-
-## D006 — Data files en directorio data/
-- **Fecha**: 2026-04-27
-- **Contexto**: Configuración, métricas, memoria, runs, snapshots, folders
+- **Contexto**: Configuración, métricas, memoria, runs, snapshots
 - **Decisión**: Todos los datos persistentes en data/, excluidos de git via .gitignore
-- **Razón**: Los datos son específicos de cada instalación y pueden contener información sensible. .gitignore excluye data/ y rag_storage/.
+- **Razón**: Los datos son específicos de cada instalación y pueden contener información sensible
 - **Estado**: Activa
 
-## D007 — Agent Harness configurables
-- **Fecha**: 2026-04-27
-- **Contexto**: Diferentes estrategias de tool-calling y planning
-- **Decisión**: Soportar 4 harnesses: opencode (default), native, little-coder, claude-code
-- **Razón**: Diferentes tareas requieren diferentes estrategias. opencode ofrece el mejor balance. native es más simple. little-coder para tareas de código. claude-code para compatibilidad con flujo Claude Code.
+## D010 — Config keys bloqueadas
+- **Fecha**: 2026-05-02
+- **Contexto**: El usuario podía modificar cualquier variable de settings
+- **Decisión**: `_LOCKED_ENV_KEYS` bloquea: AGENT_HARNESS, AGENT_EXECUTION_MODE, LLM_PROVIDER, LLAMACPP_EXECUTABLE, LLAMACPP_MODEL_PATH, LLAMACPP_MODEL_ALIAS
+- **Razón**: Prevenir que el usuario rompa la configuración crítica del runtime
 - **Estado**: Activa
 
-## D008 — Chat modes separados
-- **Fecha**: 2026-04-27
-- **Contexto**: Diferentes modos de interacción con el agente
-- **Decisión**: 4 modes: normal (default), plan, iterate, simple
-- **Razón**: normal para uso general. plan para tareas complejas con planning explícito. iterate para tareas con feedback. simple para preguntas directas sin tool-calling.
-- **Estado**: Activa
-
-## D009 — MCP Server como proceso separado
-- **Fecha**: 2026-04-27
-- **Contexto**: Integración con herramientas externas via MCP
-- **Decisión**: mcp_server.py corre en puerto 8000 como proceso independiente
-- **Razón**: Separar MCP del backend principal (7719) permite que agentes externos consuman las herramientas sin depender del ciclo de vida del servidor de chat.
-- **Estado**: Activa
-
-## D010 — Guardrails con validación Pydantic
-- **Fecha**: 2026-04-27
-- **Contexto**: Validación de input/output del agente
-- **Decisión**: Guardrails usa modelos Pydantic para validar entradas y salidas
-- **Razón**: Pydantic ofrece validación tipada eficiente. Detecta patrones prohibidos y contenido inseguro. Se ejecuta inline en el tool-calling loop.
-- **Estado**: Activa
-ENDOFFILE
+## D011 — Features removidas
+- **Fecha**: 2026-05-02
+- **Contexto**: Versión anterior tenía: multi-provider, multi-harness, task router, model hub, RAG pipeline, advanced mode, plan/iterate modes
+- **Decisión**: Remover todas estas features para simplificar
+- **Razón**: Reducir complejidad, mantener foco en opencode + llama.cpp, eliminar deuda técnica
+- **Estado**: Histórica (features removidas)

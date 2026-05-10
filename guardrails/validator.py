@@ -3,10 +3,40 @@ from typing import List, Optional
 import re
 
 class AgentQuery(BaseModel):
+    """Validated user query payload for guardrails checks.
+
+    Purpose:
+        Defines and validates the input query before it enters the agent loop.
+
+    Parameters:
+        query (str): User message to validate.
+
+    Returns:
+        AgentQuery: Pydantic model instance with normalized values.
+
+    Raises:
+        pydantic.ValidationError: If `query` is missing or not a valid string.
+        ValueError: If the validator detects potentially unsafe patterns.
+    """
     query: str
 
     @field_validator('query')
     def check_safe_content(cls, v):
+        """Reject obvious jailbreak or destructive-instruction patterns.
+
+        Purpose:
+            Applies a lightweight regex-based filter over the raw query text.
+
+        Parameters:
+            cls: Pydantic class reference.
+            v (str): Query value under validation.
+
+        Returns:
+            str: Original query value when it passes all checks.
+
+        Raises:
+            ValueError: If a forbidden pattern is found in the query.
+        """
         # Basic injection/jailbreak detection
         forbidden_patterns = [
             r"ignore previous instructions",
@@ -20,10 +50,41 @@ class AgentQuery(BaseModel):
         return v
 
 class AgentResponse(BaseModel):
+    """Validated outbound response envelope.
+
+    Purpose:
+        Represents the response content and optional source references.
+
+    Parameters:
+        content (str): Assistant answer text.
+        sources (List[str]): Optional provenance/source labels.
+
+    Returns:
+        AgentResponse: Pydantic model instance.
+
+    Raises:
+        pydantic.ValidationError: If input types are invalid.
+    """
     content: str
     sources: List[str] = []
 
 def validate_input(query: str) -> dict:
+    """Validate user input and return a normalized status payload.
+
+    Purpose:
+        Wraps `AgentQuery` model validation and provides a serializable result
+        structure for API consumers.
+
+    Parameters:
+        query (str): Raw user query.
+
+    Returns:
+        dict: `{"valid": True, "query": ...}` on success, otherwise
+        `{"valid": False, "error": ...}`.
+
+    Raises:
+        This function catches `ValidationError` internally and does not re-raise.
+    """
     try:
         valid_query = AgentQuery(query=query)
         return {"valid": True, "query": valid_query.query}
@@ -31,6 +92,21 @@ def validate_input(query: str) -> dict:
         return {"valid": False, "error": str(e)}
 
 def validate_output(content: str, sources: List[str] = []) -> dict:
+    """Validate output payload constraints before returning a response.
+
+    Purpose:
+        Ensures output content is not empty and keeps a consistent envelope.
+
+    Parameters:
+        content (str): Assistant-generated output text.
+        sources (List[str], optional): Source labels or references.
+
+    Returns:
+        dict: Validation result with `valid` flag and payload details.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     # Ensure response is not empty and sources are valid strings
     if not content.strip():
         return {"valid": False, "error": "Empty response content."}
@@ -39,6 +115,22 @@ def validate_output(content: str, sources: List[str] = []) -> dict:
 
 
 def explain_error_for_humans(error_text: str) -> dict:
+    """Map low-level errors to user-facing explanations and recovery steps.
+
+    Purpose:
+        Converts technical failures into actionable guidance for non-technical
+        or beginner users.
+
+    Parameters:
+        error_text (str): Raw error string from runtime or tool execution.
+
+    Returns:
+        dict: Localized human-readable message, common causes, and suggested
+        remediation steps.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     raw = str(error_text or "").strip()
     low = raw.lower()
     if "timeout" in low:

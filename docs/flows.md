@@ -1,148 +1,136 @@
 # Flows — UNLZ Agent
 
-> Flujos de usuario y del sistema.
+> Flujos de usuario y del sistema. Última actualización: 2026-05-02.
+
+## Flujo: Bootstrap al inicio
+
+1. `agent_server.py` arranca → `_startup_bootstrap()`
+2. `_bootstrap_locked_runtime()` fuerza config:
+   - `AGENT_HARNESS=opencode`, `LLM_PROVIDER=llamacpp`, `AGENT_EXECUTION_MODE=autonomous`
+   - Detecta hardware (VRAM/RAM) → bucket (cpu/gpu_4/gpu_8/gpu_12/gpu_16/gpu_24/gpu_32)
+   - Lee `_default_hardware_plan()` o `UNLZ_HARDWARE_MODEL_PLAN_JSON` → selecciona modelo por bucket
+   - Verifica si modelo existe en disco. Si no, descarga desde HuggingFace
+   - Verifica SHA256 si está configurado
+   - Escribe `LLAMACPP_MODEL_PATH`, `LLAMACPP_MODEL_ALIAS` en `.env`
+3. Si `UNLZ_OPENCODE_WARMUP_ON_STARTUP=1` (default): ejecuta `_run_opencode_warmup_once()` en background
+4. Estado de bootstrap accesible vía `GET /bootstrap/status`
 
 ## Flujo: Chat con streaming
 
-1. Usuario escribe mensaje en Desktop UI (ChatView)
-2. App.tsx envía POST /chat a agent_server.py (puerto 7719)
-   - Body: { message, history, system_prompt, mode, conversation_id, ... }
-3. agent_server.py:
-   a. Lee config.py para determinar LLM provider y modelo
-   b. Si llamacpp y no running -> llamacpp_start()
-   c. Construye contexto: historial + RAG retrieval (si habilitado)
-   d. Ejecuta tool-calling loop con LangChain
-   e. Si mode=plan: genera plan, ejecuta pasos, valida resultados
-   f. Si mode=iterate: iteración guiada con feedback
-   g. Aplica guardrails a output
-4. Responde con SSE events:
-   - run: inicia corrida con run_id
-   - step: tool call o acción del agente
-   - chunk: fragmento de respuesta textual
-   - confidence: score de confianza + tool calls usados
-   - error: error en ejecución
-   - done: corrida completada
-5. Desktop UI streamChat() recibe events y:
-   - Actualiza Zustand store (messages)
-   - StreamingRenderer renderiza en tiempo real
-   - ChatView muestra typing indicator
+1. Usuario escribe mensaje en ChatView
+2. `streamChat()` envía `POST /chat` a agent_server.py (puerto 7719)
+   - Body: `{ message, history, system_prompt, mode, conversation_id, tools_mode, internet_enabled, user_profile, ... }`
+3. Backend:
+   - Crea `run_id`, registra `cancel_event`
+   - Emite `run` event con run_id
+   - Emite `timeline` event (understanding → reading → planning → editing → validating → generating → done)
+   - Inyecta user profile si existe (experience_level, detail_level, language)
+   - Construye prompt con `_build_opencode_prompt()`: system + behavior + history + tool policy + internet policy
+   - Ejecuta `_opencode_stream()`:
+     - Verifica opencode instalado
+     - Resuelve workdir (sandbox_root o runtime root)
+     - Verifica/opera llama.cpp server
+     - Genera config opencode local aislado
+     - Ejecuta `opencode run --dir <workdir> <prompt>` como subprocess
+     - Pump stdout/stderr a queue async
+     - Parsea JSON si `--format json` soportado, sino text raw
+     - Emite SSE: `step`, `chunk`, `error`, `done`
+   - Intercepta errors: `explain_error_for_humans()` traduce a mensaje humano con causas y fix steps
+   - Persiste trace en `data/runs/{run_id}.json`
+4. Desktop UI:
+   - `streamChat()` recibe events y actualiza Zustand store
+   - ChatView renderiza chunks en tiempo real
+   - Timeline muestra stages visuales
 
-## Flujo: Gestión de conversaciones
+## Flujo: Onboarding
 
-1. Crear: POST /conversations -> retorna conversation_id
-2. Listar: GET /conversations -> array de Conversacion
-3. Seleccionar: GET /conversations/{id} -> conversation + messages
-4. Eliminar: DELETE /conversations/{id}
-5. Snapshot: GET/POST /snapshots/{id} -> guarda/restaura estado completo
-6. Cada mensaje se persiste en data/snapshots/{conversation_id}.json
+1. App.tsx carga `GET /health/onboarding` + `GET /newbie/profile`
+2. Si `onboardingCompleted=false`: muestra `OnboardingModal`
+3. Modal muestra checks:
+   - Provider opencode (instalado?)
+   - Backend 7719 (activo?)
+   - MCP 8000 (disponible?)
+   - Escritura en data/ (permisos?)
+   - RAG Chroma (índice inicializado?)
+4. Botón "Dejar todo listo" → `POST /health/onboarding/fix`:
+   - Crea dirs necesarios, asegura harness dirs
+5. Botón "Iniciar MCP" → `POST /system/mcp/start`:
+   - Ejecuta `python mcp_server.py` como subprocess detached
+6. Polling de warmup status cada 3s: `GET /opencode/warmup`
+7. Usuario cierra modal → guarda `onboarding_completed=true` en newbie profile
 
-## Flujo: Ingestión RAG
+## Flujo: Conversaciones
 
-1. Usuario selecciona PDFs en KnowledgeView
-2. POST /knowledge/ingest con files
-3. agent_server.py:
-   a. Guarda files en directorio de conocimiento
-   b. rag_pipeline/ingest.py:
-      - PyPDFLoader carga contenido
-      - RecursiveCharacterTextSplitter divide en chunks (1000 chars, 200 overlap)
-      - get_embeddings() obtiene provider (chroma/supabase)
-      - Vector store hace upsert de chunks
-4. Responde con lista de documentos ingested
-5. En próximos chats, retriever busca similitud y inyecta contexto
-
-## Flujo: Model Hub
-
-1. GET /hub/catalog -> retorna MODELS_CATALOG de hub_catalog.py
-2. GET /hub/search?q=llama -> filtra catálogo por query
-3. Usuario selecciona modelo -> POST /hub/start-download
-   - Body: { model_id }
-4. agent_server.py:
-   a. Descarga desde HuggingFace usando HF API
-   b. Guarda en directorio de modelos
-   c. Retorna download_id para tracking
-5. GET /hub/download-progress/{download_id} -> porcentaje y estado
-6. POST /hub/apply-model -> actualiza .env con nuevo modelo
-7. Hardware profiler filtra recomendaciones según GPU/VRAM/RAM
+1. Crear: `ConversationSidebar` → `createConversation()` → nuevo ID, título auto desde primer mensaje
+2. Listar: sidebar muestra `conversations[]` del store
+3. Seleccionar: `setActiveConv()` → ChatView carga mensajes de conversación activa
+4. Eliminar: `deleteConversation()` → limpia de store, si era activa selecciona siguiente
+5. Renombrar: `renameConversation()` → actualiza título
+6. Asociar carpeta: `setConversationFolder()` → vincula folderId a conversación
+7. Persistencia: Zustand persiste en localStorage (`unlz-agent2-store`)
 
 ## Flujo: Behaviors
 
-1. GET /behaviors -> lista de behaviors locales
-2. POST /behaviors -> crea behavior nuevo con system prompt
-3. PUT /behaviors/{id} -> actualiza behavior
-4. DELETE /behaviors/{id} -> elimina behavior
-5. Behaviors se almacenan en data/local_behaviors.json
-6. Se pueden asignar a conversaciones o carpetas específicas
+1. Default: 3 behaviors (Asistente UNLZ, Dev/Código, Investigación)
+2. `GET /local/behaviors` → lee `data/local_behaviors.json`
+3. Store: `createBehavior()`, `updateBehavior()`, `deleteBehavior()`
+4. `upsertBehaviors()` → merge con behaviors locales del backend
+5. `mergeDefaultBehaviors()` → asegura que defaults no se pierdan al merge
+6. Al eliminar behavior: limpia referencia en conversaciones y carpetas vinculadas
 
 ## Flujo: Folders
 
-1. GET /folders -> lista de carpetas
-2. POST /folders -> crea carpeta con nombre y descripción
-3. PUT /folders/{id} -> actualiza carpeta
-4. DELETE /folders/{id} -> elimina carpeta
-5. Cada folder tiene: id, name, description, created_at, files[]
-6. Las conversaciones pueden asociarse a un folder (folder_id en chat request)
-7. Memoria RAG se separa por folder
+1. `createFolder(name)` → nuevo ID, timestamps
+2. `updateFolder(id, updates)` → merge de updates
+3. `deleteFolder(id)` → limpia referencia en conversaciones vinculadas
+4. Conversación puede asociarse a folder → `setConversationFolder(convId, folderId)`
+5. Folder se pasa como `sandbox_root` en chat request para opencode
 
-## Flujo: Model Routing
+## Flujo: Settings
 
-1. GET /router/config -> retorna task_router.json
-2. UI muestra heatmap: areas vs modelos con accuracy/latency
-3. POST /router/config -> actualiza mapeo area->modelo
-4. POST /router/recalibrate -> recalibra con métricas acumuladas
-5. router_metrics.jsonl registra: timestamp, area, model, accuracy, latency, success
-6. El router selecciona automáticamente el mejor modelo según el área de la consulta
-
-## Flujo: Harnesses
-
-1. GET /harnesses/status -> lista de harnesses disponibles
-2. POST /harnesses/install -> instala un harness
-3. Cada harness define:
-   - Tool-calling strategy
-   - Planning approach
-   - Error handling
-   - Response format
-4. Se selecciona con AGENT_HARNESS en .env o harness_override en chat request
-
-## Flujo: Health & Monitoring
-
-1. GET /health -> status global + por componente (llm, rag, knowledge)
-2. GET /health/connectors -> health de cada connector (latencia, error rate, quota)
-3. GET /health/stats -> system stats (CPU, RAM, disco, procesos)
-4. GET /health/safety/check?q=... -> evalúa si consulta es segura
-5. Advanced Mode:
-   - GET /advanced/profiles -> perfiles de sistema
-   - GET /advanced/benchmarks -> resultados de benchmarks
-   - GET /advanced/presets -> plantillas de prompt
-   - GET /advanced/hardware -> info de hardware detectado
-   - GET /advanced/history -> historial de inicios
-   - GET /advanced/health -> monitoreo en tiempo real
+1. `GET /settings` → lee `.env` como flat map
+2. `POST /settings` → escribe keys en `.env` (excluye `_LOCKED_ENV_KEYS`)
+3. `_LOCKED_ENV_KEYS`: `AGENT_HARNESS`, `AGENT_EXECUTION_MODE`, `LLM_PROVIDER`, `LLAMACPP_EXECUTABLE`, `LLAMACPP_MODEL_PATH`, `LLAMACPP_MODEL_ALIAS`
+4. `_reload_config_runtime()` → recarga `AGENT_LANGUAGE`, `AGENT_EXECUTION_MODE`, `HARNESS_OPENCODE_BIN`
 
 ## Flujo: Dev Tools
 
-1. GET /dev/log?lines=300 -> tail de log del backend
-2. GET /dev/log/stream -> SSE stream de log en tiempo real
-3. GET /dev/traces?limit=30 -> lista de run traces
-4. GET /dev/traces/{run_id} -> trace completo de una corrida
-5. DELETE /dev/traces -> limpia traces
-6. Cada trace incluye: plan versions, tool calls, outputs, veredicto
+1. `GET /dev/log?lines=300` → tail de `agent_server.log`
+2. `GET /dev/log/stream` → SSE stream de log en tiempo real (poll cada 1s)
+3. `GET /dev/traces?limit=30` → lista de run traces (metadata + errors)
+4. `GET /dev/traces/{run_id}` → trace completo con todos los events
+5. `DELETE /dev/traces` → limpia todos los traces
 
-## Flujo: Configuración
+## Flujo: Stats + Health Center
 
-1. GET /settings -> lee todas las vars de .env como flat map
-2. POST /settings -> escribe keys SCREAMING_SNAKE_CASE en .env
-3. Al guardar: reloaded config de config.py
-4. Desktop SettingsView muestra todos los campos editables
-5. Tauri helpers también pueden leer/escribir .env directamente sin backend
+1. `GET /stats` → CPU, RAM, métricas de runs (success rate, avg duration, etc.)
+2. `GET /health/center` → estado completo: provider, model alias, opencode version, bootstrap status, recent errors
+3. `GET /newbie/profile` → perfil de usuario (language, experience_level, detail_level)
+4. `POST /newbie/profile` → guarda/merge perfil
+5. `POST /newbie/snapshot` → guarda snapshot timestamped
 
-## Flujo: MCP Server
+## Flujo: llama.cpp Management
 
-1. mcp_server.py inicia en puerto 8000
-2. Expone herramientas via MCP protocol:
-   - system_stats: uso de CPU, RAM, disco
-   - check_query_safety: evalúa seguridad de consulta
-   - rag_search: busca en vector store
-   - folder_search: busca en filesystem
-   - web_search: búsqueda web integrada
-3. Se conecta al mismo LLM que el backend principal
-4. Herramientas disponibles para agentes externos via MCP
-ENDOFFILE
+1. `POST /llamacpp/start` → `_ensure_llamacpp_server_started()`:
+   - Si ya running → ready
+   - Si no → inicia `llama-server.exe` con config actual
+   - Poll hasta timeout (default 25s, 40s en warmup)
+2. `POST /llamacpp/stop` → `_stop_llamacpp_server()`:
+   - Kill subprocess + taskkill en Windows
+3. `_llamacpp_server_url()` → `http://{LLAMACPP_HOST}:{LLAMACPP_PORT}/v1`
+
+## Flujo: Opencode Config
+
+1. `_ensure_opencode_local_config()` genera config en `data/.unlz_internal/opencode_home/.config/opencode/opencode.json`:
+   - Provider: `unlz-llama-local` con base URL de llama.cpp
+   - Model: alias de `LLAMACPP_MODEL_ALIAS`
+   - Compaction: auto + prune, 30k reserved
+2. Al ejecutar opencode: fuerza `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME` al home aislado
+3. `UNLZ_OPENCODE_CONFIG` apunta al config local
+
+## Flujo: Cancel de Run
+
+1. `POST /runs/{run_id}/cancel` → `_set_run_cancel(run_id)`
+2. `_opencode_stream()` detecta `cancel_event.is_set()` → kill PID tree
+3. Emite `error` + `done` events
+4. `_unregister_run_cancel()` limpia el event del registry

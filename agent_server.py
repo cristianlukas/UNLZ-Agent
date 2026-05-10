@@ -26,7 +26,16 @@ from urllib.request import Request, urlopen
 
 
 # ── Redirect stdout/stderr to log when not running in a real terminal ─────────
+
 def _bootstrap_runtime_root() -> str:
+    """Resolve the project root directory.
+
+    Checks UNLZ_PROJECT_ROOT env var first, then handles PyInstaller frozen
+    executables, and falls back to the script directory.
+
+    Returns:
+        Absolute path to the project root as a string.
+    """
     override = (os.getenv("UNLZ_PROJECT_ROOT") or "").strip()
     if override:
         return override
@@ -39,10 +48,23 @@ def _bootstrap_runtime_root() -> str:
 
 
 def _bootstrap_log_path() -> str:
+    """Return the absolute path to the agent server log file.
+
+    Returns:
+        Path to agent_server.log inside the runtime root.
+    """
     return os.path.join(_bootstrap_runtime_root(), "agent_server.log")
 
 
 def _install_stdio_file_log() -> None:
+    """Redirect stdout/stderr to a log file when not running in a real terminal.
+
+    Used when launched from Tauri (CREATE_NO_WINDOW) or background processes.
+    Tries primary log path first, then temp directory as fallback.
+
+    Raises:
+        No exceptions — failures are silently ignored.
+    """
     force_log = os.getenv("UNLZ_FORCE_LOG_FILE", "0").strip().lower() in ("1", "true", "yes")
     try:
         is_tty = os.isatty(sys.stdout.fileno())
@@ -78,6 +100,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 
 def _runtime_root_dir() -> Path:
+    """Resolve the project root directory as a Path object.
+
+    Same logic as _bootstrap_runtime_root but returns Path instead of str.
+    Used after imports when Path is preferred over string paths.
+
+    Returns:
+        Path object pointing to the project root directory.
+    """
     override = (os.getenv("UNLZ_PROJECT_ROOT") or "").strip()
     if override:
         return Path(override)
@@ -99,10 +129,20 @@ from guardrails.validator import explain_error_for_humans
 # ── Env helpers ───────────────────────────────────────────────────────────────
 
 def _env_path() -> Path:
+    """Return the path to the .env file.
+
+    Returns:
+        Path to .env inside the runtime root.
+    """
     return _runtime_root_dir() / ".env"
 
 
 def _reload_config_runtime() -> None:
+    """Reload critical config values from .env without restarting the server.
+
+    Updates AGENT_LANGUAGE, AGENT_EXECUTION_MODE, and HARNESS_OPENCODE_BIN
+    in the Config class to reflect changes made to .env at runtime.
+    """
     load_dotenv(dotenv_path=_env_path(), override=True)
     Config.AGENT_LANGUAGE = os.getenv("AGENT_LANGUAGE", "es").lower()
     Config.AGENT_EXECUTION_MODE = os.getenv("AGENT_EXECUTION_MODE", "autonomous").lower()
@@ -110,6 +150,18 @@ def _reload_config_runtime() -> None:
 
 
 def _upsert_env_settings(payload: dict) -> None:
+    """Write key-value pairs to .env file and reload runtime config.
+
+    Only processes keys that are uppercase (SCREAMING_SNAKE_CASE).
+    Existing keys are updated in place; new keys are appended.
+    Calls _reload_config_runtime() after writing.
+
+    Args:
+        payload: Dict of env var names to values.
+
+    Raises:
+        IOError: If .env file cannot be written.
+    """
     env_path = _env_path()
     content = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     for key, value in payload.items():
@@ -133,6 +185,16 @@ _LOCKED_ENV_KEYS = {
 
 
 def _select_bundled_llama_server() -> str:
+    """Find the bundled llama-server executable.
+
+    Searches in priority order:
+    1. tools/llama.cpp/opencode-mtp/llama-server.exe
+    2. llama.cpp/llama-server.exe
+    3. llama.cpp/b*/llama-server.exe (latest build directory)
+
+    Returns:
+        Absolute path to the executable, or empty string if not found.
+    """
     root = _runtime_root_dir()
     opencode_mtp = root / "tools" / "llama.cpp" / "opencode-mtp" / "llama-server.exe"
     if opencode_mtp.exists():
@@ -149,6 +211,16 @@ def _select_bundled_llama_server() -> str:
 
 
 def _detect_hardware_tier() -> tuple[str, float, float]:
+    """Detect system hardware capabilities.
+
+    Queries RAM via psutil and VRAM via nvidia-smi (Windows).
+    Classifies the system into a tier based on available memory.
+
+    Returns:
+        Tuple of (tier, vram_gb, ram_gb) where tier is one of:
+        'ultra' (VRAM>=20 or RAM>=64), 'high' (VRAM>=12 or RAM>=32),
+        'mid' (VRAM>=8 or RAM>=16), or 'entry' (everything else).
+    """
     ram_gb = 0.0
     vram_gb = 0.0
     try:
@@ -180,6 +252,16 @@ def _detect_hardware_tier() -> tuple[str, float, float]:
 
 
 def _hardware_bucket(vram_gb: float) -> str:
+    """Map VRAM amount to a hardware bucket key.
+
+    Buckets correspond to entries in the hardware plan dict.
+
+    Args:
+        vram_gb: Available GPU VRAM in gigabytes.
+
+    Returns:
+        Bucket key: 'cpu', 'gpu_4', 'gpu_8', 'gpu_12', 'gpu_16', 'gpu_24', or 'gpu_32'.
+    """
     if vram_gb <= 0:
         return "cpu"
     if vram_gb < 6:
@@ -196,6 +278,15 @@ def _hardware_bucket(vram_gb: float) -> str:
 
 
 def _default_hardware_plan() -> dict[str, Any]:
+    """Return the default hardware-to-model mapping plan.
+
+    Maps each hardware bucket to a recommended GGUF model with download
+    info from HuggingFace. Each entry contains profile_name, opencode_model_id,
+    model_folder, alias, hf_repo, filename, and optional fallback_candidates.
+
+    Returns:
+        Dict keyed by hardware bucket (cpu, gpu_4, gpu_8, etc.) with model specs.
+    """
     return {
         "cpu": {
             "profile_name": "1_ GEMMA",
@@ -293,6 +384,15 @@ def _default_hardware_plan() -> dict[str, Any]:
 
 
 def _read_hardware_plan() -> dict[str, Any]:
+    """Read hardware plan from environment variable or return default.
+
+    Checks UNLZ_HARDWARE_MODEL_PLAN_JSON for a custom JSON plan.
+    Falls back to _default_hardware_plan() if env var is empty, invalid JSON,
+    or not a dict.
+
+    Returns:
+        Dict mapping hardware buckets to model specifications.
+    """
     raw = (os.getenv("UNLZ_HARDWARE_MODEL_PLAN_JSON") or "").strip()
     if not raw:
         return _default_hardware_plan()
@@ -306,6 +406,20 @@ def _read_hardware_plan() -> dict[str, Any]:
 
 
 def _download_hf_file(hf_repo: str, filename: str, dest: Path) -> None:
+    """Download a file from HuggingFace to the destination path.
+
+    Downloads to a .part temp file first, then atomically replaces the
+    destination on success. Updates _BOOTSTRAP_STATE with progress info.
+
+    Args:
+        hf_repo: HuggingFace repo ID (e.g. 'unsloth/Qwen3.6-4B-GGUF').
+        filename: Filename within the repo.
+        dest: Destination path for the downloaded file.
+
+    Raises:
+        urllib.error.URLError: If download fails or times out (60s).
+        IOError: If destination directory cannot be created.
+    """
     url = f"https://huggingface.co/{hf_repo}/resolve/main/{filename}"
     req = Request(url, headers={"User-Agent": "UNLZ-Agent/2.0"})
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +448,19 @@ def _download_hf_file(hf_repo: str, filename: str, dest: Path) -> None:
 
 
 def _sha256_file(path: Path) -> str:
+    """Compute SHA256 hash of a file.
+
+    Reads in 1MB chunks for memory efficiency.
+
+    Args:
+        path: Path to the file to hash.
+
+    Returns:
+        Lowercase hex digest string.
+
+    Raises:
+        IOError: If file cannot be read.
+    """
     h = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -342,6 +469,21 @@ def _sha256_file(path: Path) -> str:
 
 
 def _resolve_download_target(selected_plan: dict[str, Any]) -> dict[str, str]:
+    """Select the first valid download candidate from a hardware plan entry.
+
+    Checks the primary model first, then fallback_candidates. Returns the
+    first candidate that has both hf_repo and filename set.
+
+    Args:
+        selected_plan: Hardware plan entry with model_folder, alias, hf_repo,
+            filename, and optional fallback_candidates list.
+
+    Returns:
+        Dict with keys: model_folder, alias, hf_repo, filename, sha256.
+
+    Raises:
+        RuntimeError: If no valid candidate is found.
+    """
     primary = {
         "model_folder": str(selected_plan.get("model_folder") or "").strip(),
         "alias": str(selected_plan.get("alias") or "").strip(),
@@ -384,6 +526,18 @@ _OPENCODE_WARMUP_LOCK = threading.Lock()
 
 
 def _bootstrap_locked_runtime() -> None:
+    """Initialize the runtime: force config, detect hardware, select/download model.
+
+    This is the main bootstrap function called at server startup. It:
+    1. Forces AGENT_HARNESS=opencode, LLM_PROVIDER=llamacpp, AGENT_EXECUTION_MODE=autonomous
+    2. Detects hardware tier (VRAM/RAM) and maps to hardware bucket
+    3. Selects model from hardware plan for the detected bucket
+    4. Verifies model exists on disk with SHA256 check
+    5. Downloads from HuggingFace if missing or checksum mismatch
+    6. Writes LLAMACPP_MODEL_PATH and LLAMACPP_MODEL_ALIAS to .env
+
+    Updates _BOOTSTRAP_STATE with progress and final status.
+    """
     profiles_file = os.getenv("UNLZ_OPENCODE_PROFILES_FILE", r"C:\Users\cristian\Documents\OpenCode\launcher_profiles.json")
     models_dir = Path(os.getenv("LLAMACPP_MODELS_DIR") or str(_runtime_root_dir() / "llama.cpp" / "models"))
     bundled = _select_bundled_llama_server()
@@ -525,6 +679,16 @@ def _bootstrap_locked_runtime() -> None:
 
 
 def _slug_alias(name: str) -> str:
+    """Convert a model name to a URL-safe alias slug.
+
+    Replaces underscores, dots, and spaces with hyphens. Lowercases result.
+
+    Args:
+        name: Raw model name or alias.
+
+    Returns:
+        Slugified alias string. Defaults to 'local-model' if empty.
+    """
     alias = (name or "local-model").strip().lower()
     for ch in ("_", ".", " "):
         alias = alias.replace(ch, "-")
@@ -534,6 +698,17 @@ def _slug_alias(name: str) -> str:
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def _http_reachable(url: str, timeout: float = 1.5) -> bool:
+    """Check if an HTTP(S) endpoint is reachable.
+
+    Performs a GET request and accepts any 1xx-5xx status code as reachable.
+
+    Args:
+        url: Full URL to check.
+        timeout: Connection and read timeout in seconds.
+
+    Returns:
+        True if the endpoint responded with a valid HTTP status, False otherwise.
+    """
     try:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -554,10 +729,23 @@ def _http_reachable(url: str, timeout: float = 1.5) -> bool:
 
 
 def _opencode_config_path() -> Path:
+    """Return the path to the opencode config file.
+
+    Returns:
+        Path to opencode.json in the isolated opencode home directory.
+    """
     return _opencode_local_config_path()
 
 
 def _opencode_selected_base_url() -> str:
+    """Extract the base URL from the opencode config's selected provider.
+
+    Reads the model field (e.g. 'unlz-llama-local/alias'), extracts the
+    provider ID, then returns the provider's baseURL option.
+
+    Returns:
+        Base URL string, or empty string if config is missing or invalid.
+    """
     p = _opencode_config_path()
     if not p.exists():
         return ""
@@ -575,12 +763,30 @@ def _opencode_selected_base_url() -> str:
 
 
 def _llamacpp_server_url() -> str:
+    """Build the llama.cpp server OpenAI-compatible API URL.
+
+    Returns:
+        URL string like 'http://127.0.0.1:8081/v1'.
+    """
     host = (os.getenv("LLAMACPP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = (os.getenv("LLAMACPP_PORT") or "8081").strip() or "8081"
     return f"http://{host}:{port}/v1"
 
 
 def _ensure_llamacpp_server_started(timeout_sec: int = 25) -> tuple[bool, str]:
+    """Start the llama.cpp server subprocess if not already running.
+
+    Checks if the server is reachable. If not, starts llama-server.exe with
+    the configured model, host, port, context size, and extra args.
+    Polls until the server responds or timeout is reached.
+
+    Args:
+        timeout_sec: Maximum seconds to wait for server startup.
+
+    Returns:
+        Tuple of (success, detail_message). If success is True, detail is
+        'ready' or 'started'. If False, detail describes the failure reason.
+    """
     target = _llamacpp_server_url()
     if _http_reachable(target, timeout=1.2):
         return True, "ready"
@@ -659,6 +865,11 @@ def _ensure_llamacpp_server_started(timeout_sec: int = 25) -> tuple[bool, str]:
 
 
 def _stop_llamacpp_server() -> None:
+    """Terminate the managed llama.cpp server subprocess.
+
+    On Windows, uses taskkill /T /F to kill the process tree.
+    On other platforms, sends SIGTERM. Clears the global proc reference.
+    """
     with _LLAMA_SERVER_PROC_LOCK:
         global _LLAMA_SERVER_PROC
         proc = _LLAMA_SERVER_PROC
@@ -675,6 +886,14 @@ def _stop_llamacpp_server() -> None:
 
 
 def _run_opencode_warmup_once() -> dict[str, Any]:
+    """Run a single opencode warmup to pre-load the model.
+
+    Ensures llama.cpp is started, then runs opencode with a short prompt
+    to trigger model loading. Uses isolated home directory and config.
+
+    Returns:
+        Dict with keys: status ('ready'/'error'), detail, started_at, finished_at.
+    """
     started_at = datetime.now().isoformat(timespec="seconds")
     bin_path = _opencode_bin()
     if not bin_path:
@@ -735,42 +954,97 @@ def _run_opencode_warmup_once() -> dict[str, Any]:
 # ── Data paths ────────────────────────────────────────────────────────────────
 
 def _runs_dir() -> Path:
+    """Return the runtime directory used to persist per-run traces.
+
+    Purpose:
+        Ensures `data/runs/` exists and provides a stable location for trace
+        files generated by streaming chat runs.
+
+    Parameters:
+        None.
+
+    Returns:
+        Path: Absolute path to the runs directory.
+
+    Raises:
+        OSError: If directory creation fails.
+    """
     p = Path(Config.DATA_DIR) / "runs"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _trace_path(run_id: str) -> Path:
+    """Build the JSON trace file path for a run identifier.
+
+    Parameters:
+        run_id (str): Sanitized run identifier.
+
+    Returns:
+        Path: Absolute path to the run trace file.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     return _runs_dir() / f"{run_id}.json"
 
 
 def _persist_trace(run_id: str, trace: dict) -> None:
+    """Persist a run trace payload as formatted UTF-8 JSON.
+
+    Parameters:
+        run_id (str): Run identifier.
+        trace (dict): Serializable trace payload.
+
+    Returns:
+        None.
+
+    Raises:
+        OSError: If the file cannot be written.
+        TypeError: If `trace` contains non-serializable values.
+    """
     _trace_path(run_id).write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _log_path() -> Path:
+    """Return the absolute path of the backend log file."""
     return _runtime_root_dir() / "agent_server.log"
 
 
 def _newbie_profile_path() -> Path:
+    """Return and ensure the beginner profile JSON path under `data/`."""
     p = Path(Config.DATA_DIR) / "newbie_profile.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _newbie_metrics_path() -> Path:
+    """Return and ensure the beginner metrics JSON path under `data/`."""
     p = Path(Config.DATA_DIR) / "newbie_metrics.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _newbie_snapshots_dir() -> Path:
+    """Return and ensure the snapshots directory for beginner flows."""
     p = Path(Config.DATA_DIR) / "snapshots"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _load_json_file(path: Path, default: Any) -> Any:
+    """Load a JSON file safely with fallback to a default value.
+
+    Parameters:
+        path (Path): File path to read.
+        default (Any): Value returned when file is absent or invalid.
+
+    Returns:
+        Any: Parsed JSON value or `default`.
+
+    Raises:
+        This function catches read/parse exceptions and does not re-raise.
+    """
     try:
         if not path.exists():
             return default
@@ -780,6 +1054,19 @@ def _load_json_file(path: Path, default: Any) -> Any:
 
 
 def _save_json_file(path: Path, payload: Any) -> None:
+    """Write a payload as human-readable UTF-8 JSON.
+
+    Parameters:
+        path (Path): Destination file path.
+        payload (Any): JSON-serializable value to write.
+
+    Returns:
+        None.
+
+    Raises:
+        OSError: If writing to disk fails.
+        TypeError: If `payload` is not JSON serializable.
+    """
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -790,6 +1077,17 @@ _active_run_cancels_lock = threading.Lock()
 
 
 def _register_run_cancel(run_id: str) -> asyncio.Event:
+    """Register and return the cancellation event for a run.
+
+    Parameters:
+        run_id (str): Unique run identifier.
+
+    Returns:
+        asyncio.Event: Event that can be signaled to request cancellation.
+
+    Raises:
+        This function does not raise exceptions intentionally.
+    """
     ev = asyncio.Event()
     with _active_run_cancels_lock:
         _active_run_cancels[run_id] = ev
@@ -797,11 +1095,23 @@ def _register_run_cancel(run_id: str) -> asyncio.Event:
 
 
 def _unregister_run_cancel(run_id: str) -> None:
+    """Remove a run cancellation handle from the in-memory registry."""
     with _active_run_cancels_lock:
         _active_run_cancels.pop(run_id, None)
 
 
 def _set_run_cancel(run_id: str) -> bool:
+    """Signal cancellation for a registered run.
+
+    Parameters:
+        run_id (str): Run identifier.
+
+    Returns:
+        bool: `True` if the run existed and was signaled, else `False`.
+
+    Raises:
+        This function suppresses event signaling errors and returns `False`.
+    """
     with _active_run_cancels_lock:
         ev = _active_run_cancels.get(run_id)
     if not ev:
@@ -816,6 +1126,21 @@ def _set_run_cancel(run_id: str) -> bool:
 # ── Local behaviors ───────────────────────────────────────────────────────────
 
 def _load_local_behaviors() -> list[dict]:
+    """Load user-defined local behaviors from persisted JSON.
+
+    Purpose:
+        Parses and sanitizes behavior definitions stored in
+        `data/local_behaviors.json`, applying defaults for optional fields.
+
+    Parameters:
+        None.
+
+    Returns:
+        list[dict]: Normalized local behavior records ready for API responses.
+
+    Raises:
+        This function catches file and JSON parse errors internally.
+    """
     path = Path(Config.DATA_DIR) / "local_behaviors.json"
     if not path.exists():
         return []
@@ -857,42 +1182,58 @@ def _load_local_behaviors() -> list[dict]:
 # ── Harness meta ──────────────────────────────────────────────────────────────
 
 def _harness_install_root() -> Path:
+    """Return the directory where local harness artifacts are installed."""
     return _runtime_root_dir() / "data" / ".unlz_internal" / "harnesses"
 
 
 def _harness_meta_path() -> Path:
+    """Return the metadata JSON path for installed harness information."""
     return _harness_install_root() / "harnesses.json"
 
 
 def _ensure_harness_dirs() -> None:
+    """Ensure harness install directories exist on disk."""
     _harness_install_root().mkdir(parents=True, exist_ok=True)
 
 
 def _unlz_internal_dir() -> Path:
+    """Ensure and return the internal runtime data directory."""
     p = _runtime_root_dir() / "data" / ".unlz_internal"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _opencode_local_home_dir() -> Path:
+    """Ensure and return the isolated opencode home directory."""
     p = _unlz_internal_dir() / "opencode_home"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _opencode_local_config_path() -> Path:
+    """Ensure and return the opencode local configuration file path."""
     p = _opencode_local_home_dir() / ".config" / "opencode" / "opencode.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _llamacpp_local_base_url() -> str:
+    """Build the local OpenAI-compatible base URL for llama.cpp."""
     host = (os.getenv("LLAMACPP_HOST") or "127.0.0.1").strip() or "127.0.0.1"
     port = (os.getenv("LLAMACPP_PORT") or "8081").strip() or "8081"
     return f"http://{host}:{port}/v1"
 
 
 def _ensure_opencode_local_config() -> Path:
+    """Generate or verify the opencode local config file.
+
+    Creates an isolated opencode.json with a 'unlz-llama-local' provider
+    pointing to the local llama.cpp server. Writes to data/.unlz_internal/
+    opencode_home/.config/opencode/opencode.json.
+
+    Returns:
+        Path to the config file.
+    """
     cfg_path = _opencode_local_config_path()
     alias = (os.getenv("LLAMACPP_MODEL_ALIAS") or "unlz-local-model").strip() or "unlz-local-model"
     base_url = _llamacpp_local_base_url()
@@ -928,6 +1269,11 @@ def _ensure_opencode_local_config() -> Path:
 
 
 def _read_harness_meta() -> dict:
+    """Read installed harness metadata from disk with safe fallback.
+
+    Returns:
+        dict: Parsed metadata map, or `{}` when missing/invalid.
+    """
     p = _harness_meta_path()
     if not p.exists():
         return {}
@@ -938,6 +1284,15 @@ def _read_harness_meta() -> dict:
 
 
 def _write_harness_meta(data: dict) -> None:
+    """Persist installed harness metadata to disk.
+
+    Parameters:
+        data (dict): Serializable metadata object.
+
+    Raises:
+        OSError: If writing fails.
+        TypeError: If `data` is not JSON serializable.
+    """
     _ensure_harness_dirs()
     _harness_meta_path().write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -945,6 +1300,7 @@ def _write_harness_meta(data: dict) -> None:
 # ── npm helper ────────────────────────────────────────────────────────────────
 
 def _which_any(candidates: list[str]) -> str:
+    """Return the first executable path found for candidate command names."""
     for name in candidates:
         p = shutil.which(name)
         if p:
@@ -953,6 +1309,7 @@ def _which_any(candidates: list[str]) -> str:
 
 
 def _npm_bin() -> str:
+    """Locate `npm` executable using PATH and common Windows install paths."""
     found = _which_any(["npm", "npm.cmd", "npm.exe"])
     if found:
         return found
@@ -969,6 +1326,7 @@ def _npm_bin() -> str:
 # ── opencode helpers ──────────────────────────────────────────────────────────
 
 def _opencode_bin() -> str:
+    """Locate the opencode CLI binary from config, PATH, or AppData."""
     configured = (os.getenv("HARNESS_OPENCODE_BIN") or getattr(Config, "HARNESS_OPENCODE_BIN", "") or "").strip()
     if configured and Path(configured).exists():
         return configured
@@ -993,6 +1351,16 @@ def _opencode_bin() -> str:
 
 
 def _opencode_version(bin_path: str) -> str:
+    """Get the opencode CLI version string.
+
+    Runs 'opencode --version' and returns the first line of output.
+
+    Args:
+        bin_path: Path to the opencode binary.
+
+    Returns:
+        Version string (max 120 chars), or empty string on failure.
+    """
     if not bin_path:
         return ""
     try:
@@ -1007,12 +1375,28 @@ def _opencode_version(bin_path: str) -> str:
 
 
 def _opencode_installed() -> bool:
+    """Check if opencode is available on the system.
+
+    Returns:
+        True if _opencode_bin() finds a valid binary path.
+    """
     return bool(_opencode_bin())
 
 
 # ── Process kill ──────────────────────────────────────────────────────────────
 
 def _kill_pid_tree(pid: int) -> bool:
+    """Kill a process and its children.
+
+    On Windows, uses 'taskkill /PID /T /F'. On other platforms, sends SIGTERM.
+    Refuses to kill PID <= 0 or the current process.
+
+    Args:
+        pid: Process ID to kill.
+
+    Returns:
+        True if the kill command was issued, False if refused or failed.
+    """
     if pid <= 0 or pid == os.getpid():
         return False
     try:
@@ -1035,14 +1419,39 @@ _OPENCODE_FLAG_CACHE: dict[str, bool] = {}
 
 
 def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from terminal output.
+
+    Args:
+        text: Raw text potentially containing ANSI color/format codes.
+
+    Returns:
+        Clean text with all ANSI sequences removed.
+    """
     return _ANSI_RE.sub("", text or "")
 
 
 def _sse(payload: dict[str, Any]) -> str:
+    """Format a dict as an SSE data line.
+
+    Args:
+        payload: Dict to serialize as JSON.
+
+    Returns:
+        String like "data: {json}\n\n".
+    """
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
 def _timeline_stage_for_step(step_text: str) -> tuple[str, str]:
+    """Map an opencode step text to a UI timeline stage.
+
+    Args:
+        step_text: The step identifier from opencode (e.g. 'tool', 'plan', 'search').
+
+    Returns:
+        Tuple of (stage_key, human_label). Stages: understanding, reading,
+        planning, editing, validating.
+    """
     low = (step_text or "").strip().lower()
     if not low:
         return ("understanding", "Analizando tu pedido")
@@ -1060,10 +1469,30 @@ def _timeline_stage_for_step(step_text: str) -> tuple[str, str]:
 
 
 def _timeline_sse(stage: str, label: str) -> str:
+    """Create a timeline SSE event with timestamp.
+
+    Args:
+        stage: Stage key (understanding, reading, planning, editing, validating, generating, done).
+        label: Human-readable label for the stage.
+
+    Returns:
+        SSE-formatted timeline event string.
+    """
     return _sse({"type": "timeline", "stage": stage, "label": label, "ts": int(time.time() * 1000)})
 
 
 def _detect_confusion_signal(message: str, history: list[dict[str, Any]]) -> bool:
+    """Detect if the user appears confused based on message and recent history.
+
+    Checks for trigger phrases like "no entend", "explicá más simple", "me perdí".
+
+    Args:
+        message: Current user message.
+        history: Recent conversation turns.
+
+    Returns:
+        True if confusion triggers are detected.
+    """
     text = " ".join(
         [str(message or "")]
         + [str((h or {}).get("content") or "") for h in history[-4:]]
@@ -1107,6 +1536,25 @@ def _build_opencode_prompt(
     internet_enabled: bool = True,
     tools_mode: str = "auto",
 ) -> str:
+    """Build the full prompt string passed to opencode.
+
+    Assembles sections: [SYSTEM] (base + behavior), [SESSION] (mode, tool/internet policy),
+    [HISTORY] (last 12 turns), [USER] (current message), [INSTRUCTIONS].
+
+    Detects confusion signals in the message/history and injects beginner-friendly
+    instructions when the user appears confused.
+
+    Args:
+        message: Current user message.
+        history: List of {role, content} dicts.
+        system_prompt: Optional behavior-specific system prompt.
+        mode: Chat mode ('normal', 'simple', etc.).
+        internet_enabled: Whether internet tools are allowed.
+        tools_mode: 'auto', 'with_tools', or 'without_tools'.
+
+    Returns:
+        Complete prompt string with all sections joined by blank lines.
+    """
     base = _OPENCODE_SYSTEM_PROMPT
     if system_prompt:
         base = f"{base}\n\nBehavior profile:\n{system_prompt}"
@@ -1148,6 +1596,40 @@ async def _opencode_stream(
     llamacpp_overrides: Optional[dict[str, Any]] = None,
     cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncGenerator[str, None]:
+    """Execute opencode as a subprocess and stream output as SSE events.
+
+    This is the core execution function. It:
+    1. Validates opencode binary and working directory
+    2. Ensures llama.cpp is reachable
+    3. Builds prompt with _build_opencode_prompt()
+    4. Spawns opencode subprocess with isolated HOME, config, env
+    5. Pumps stdout/stderr to an async queue
+    6. Parses JSON output (if --format json supported) or raw text
+    7. Yields SSE events: step, chunk, error, done
+
+    Supports cancellation via cancel_event which kills the process tree.
+    Handles timeouts: first_chunk_timeout for cold starts, silent_timeout for stalls.
+
+    Args:
+        message: User's current message.
+        history: Conversation history as [{role, content}, ...].
+        system_prompt: Optional behavior system prompt.
+        model_override: Optional model ID override.
+        harness_override: Unused (opencode-only).
+        folder_id: Unused (sandbox_root takes precedence).
+        sandbox_root: Working directory for opencode. Defaults to runtime root.
+        mode: Chat mode string.
+        internet_enabled: Whether internet access is allowed.
+        tools_mode: 'auto', 'with_tools', or 'without_tools'.
+        llamacpp_overrides: Unused (config is managed by bootstrap).
+        cancel_event: Asyncio Event to signal cancellation.
+
+    Yields:
+        SSE-formatted strings: "data: {json}\n\n"
+
+    Raises:
+        No exceptions — errors are yielded as SSE error events.
+    """
     bin_path = _opencode_bin()
     if not bin_path:
         yield _sse({"type": "error", "text": "opencode no instalado o no encontrado en PATH. Instalá con: npm i -g opencode-ai"})
@@ -1453,6 +1935,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _startup_bootstrap():
+    """Run at server startup: bootstrap runtime then optionally warm up opencode.
+
+    1. Runs _bootstrap_locked_runtime() in a thread (forces config, downloads model)
+    2. If UNLZ_OPENCODE_WARMUP_ON_STARTUP=1, starts background warmup task
+    """
     try:
         _BOOTSTRAP_STATE.update({"status": "running", "detail": "Inicializando runtime bloqueado..."})
         await asyncio.to_thread(_bootstrap_locked_runtime)
@@ -1475,6 +1962,24 @@ async def _startup_bootstrap():
 
 
 class ChatRequest(BaseModel):
+    """Request body for the chat endpoint.
+
+    Attributes:
+        message: User's current message.
+        history: Previous conversation turns as [{role, content}, ...].
+        system_prompt: Optional behavior-specific system prompt override.
+        model_override: Optional model alias override.
+        harness_override: Always opencode (retained for compatibility).
+        llamacpp_overrides: Per-request llama.cpp runtime overrides.
+        folder_id: Optional folder scope for sandboxed operations.
+        sandbox_root: Absolute path for opencode working directory.
+        mode: Chat mode (default 'normal').
+        conversation_id: Optional ID for trace persistence.
+        dry_run: If True, returns immediately without executing opencode.
+        internet_enabled: Whether internet access is allowed.
+        tools_mode: 'auto', 'with_tools', or 'without_tools'.
+        user_profile: Dict with experience_level, detail_level, language.
+    """
     message: str
     history: list[dict[str, Any]] = Field(default_factory=list)
     system_prompt: str = ""
@@ -1492,16 +1997,41 @@ class ChatRequest(BaseModel):
 
 
 class HarnessInstallRequest(BaseModel):
+    """Request body for installing a harness.
+
+    Attributes:
+        harness_id: ID of the harness to install (only 'opencode' supported).
+    """
     harness_id: str
 
 
 class OnboardingActionRequest(BaseModel):
+    """Request body for onboarding fix action.
+
+    Attributes:
+        ensure_runtime: If True, creates required directories and harness dirs.
+    """
     ensure_runtime: bool = True
 
 
 # ── Chat endpoint ─────────────────────────────────────────────────────────────
 
 def _chat_streaming_response(req: ChatRequest) -> StreamingResponse:
+    """Build the SSE streaming response for a chat request.
+
+    Wraps _opencode_stream() with:
+    - Run ID generation and cancel event registration
+    - Trace collection (all SSE events persisted to data/runs/)
+    - Timeline stage injection (understanding → reading → planning → ...)
+    - User profile injection into system prompt
+    - Error explanation via explain_error_for_humans()
+
+    Args:
+        req: Parsed ChatRequest from the POST /chat endpoint.
+
+    Returns:
+        StreamingResponse with text/event-stream media type and no-cache headers.
+    """
     run_id = str(uuid.uuid4())
     cancel_event = _register_run_cancel(run_id)
 
@@ -1623,6 +2153,17 @@ def _chat_streaming_response(req: ChatRequest) -> StreamingResponse:
 @app.post("/api/chat")
 @app.post("/api/chat/stream")
 async def chat_endpoint(req: ChatRequest):
+    """Streaming chat endpoint compatible with legacy and `/api` routes.
+
+    Parameters:
+        req (ChatRequest): Structured chat request payload.
+
+    Returns:
+        StreamingResponse: Server-Sent Events stream generated by the tool loop.
+
+    Raises:
+        HTTPException: Downstream request validation/runtime errors.
+    """
     return _chat_streaming_response(req)
 
 
@@ -1630,6 +2171,17 @@ async def chat_endpoint(req: ChatRequest):
 
 @app.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str):
+    """Request cancellation of an active streaming run.
+
+    Parameters:
+        run_id (str): Run identifier from prior `/chat` response events.
+
+    Returns:
+        dict: Cancellation status and normalized `run_id`.
+
+    Raises:
+        HTTPException: If `run_id` is invalid after sanitization.
+    """
     safe = re.sub(r"[^a-zA-Z0-9_-]", "", (run_id or "").strip())
     if not safe:
         raise HTTPException(status_code=400, detail="invalid run id")
@@ -1641,6 +2193,7 @@ async def cancel_run(run_id: str):
 
 @app.get("/health")
 async def health():
+    """Return backend health and opencode dependency readiness status."""
     _reload_config_runtime()
     oc_installed = _opencode_installed()
     oc_bin = _opencode_bin()
@@ -1659,6 +2212,11 @@ async def health():
 
 @app.get("/health/onboarding")
 async def onboarding_health():
+    """Return onboarding diagnostics across runtime prerequisites.
+
+    Returns:
+        dict: Composite readiness state plus per-check remediation actions.
+    """
     _reload_config_runtime()
     runtime_root = _runtime_root_dir()
     data_dir = Path(Config.DATA_DIR)
@@ -1716,6 +2274,7 @@ async def onboarding_health():
 
 @app.post("/health/onboarding/fix")
 async def onboarding_fix(_req: OnboardingActionRequest):
+    """Apply minimal runtime bootstrap fixes for onboarding flows."""
     _ensure_harness_dirs()
     (Path(Config.DATA_DIR)).mkdir(parents=True, exist_ok=True)
     _newbie_snapshots_dir()
@@ -1724,6 +2283,14 @@ async def onboarding_fix(_req: OnboardingActionRequest):
 
 @app.post("/system/mcp/start")
 async def start_mcp_server():
+    """Start `mcp_server.py` as a detached background process.
+
+    Returns:
+        dict: Startup status (`already_running`, `started`, or `starting`).
+
+    Raises:
+        HTTPException: If script is missing or process launch fails.
+    """
     if _http_reachable("http://127.0.0.1:8000/"):
         return {"status": "already_running"}
     script = _runtime_root_dir() / "mcp_server.py"
@@ -1750,6 +2317,7 @@ async def start_mcp_server():
 
 @app.post("/system/mcp/stop")
 async def stop_mcp_server():
+    """Stop MCP server processes and report final reachability state."""
     if os.name == "nt":
         cmd = (
             "Get-CimInstance Win32_Process | "
@@ -1771,12 +2339,14 @@ async def stop_mcp_server():
 
 @app.post("/llamacpp/start")
 async def llamacpp_start():
+    """Ensure local llama.cpp server is running and reachable."""
     ok, reason = _ensure_llamacpp_server_started(timeout_sec=40)
     return {"status": "ready" if ok else "error", "detail": reason, "url": _llamacpp_server_url()}
 
 
 @app.post("/llamacpp/stop")
 async def llamacpp_stop():
+    """Stop local llama.cpp server and return resulting status."""
     _stop_llamacpp_server()
     await asyncio.sleep(0.3)
     alive = _http_reachable(_llamacpp_server_url(), timeout=1.0)
@@ -1785,12 +2355,14 @@ async def llamacpp_stop():
 
 @app.get("/opencode/warmup")
 async def opencode_warmup_status():
+    """Return current opencode warmup task state snapshot."""
     with _OPENCODE_WARMUP_LOCK:
         return dict(_OPENCODE_WARMUP_STATE)
 
 
 @app.post("/opencode/warmup")
 async def opencode_warmup_run():
+    """Execute a single opencode warmup pass unless already running."""
     with _OPENCODE_WARMUP_LOCK:
         if _OPENCODE_WARMUP_STATE.get("status") == "running":
             return dict(_OPENCODE_WARMUP_STATE)
@@ -1808,6 +2380,7 @@ async def opencode_warmup_run():
 
 @app.get("/newbie/task-templates")
 async def newbie_task_templates():
+    """Return predefined beginner task templates for quick prompting."""
     return [
         {
             "id": "explain_error",
@@ -1840,6 +2413,11 @@ async def newbie_task_templates():
 
 @app.get("/settings")
 async def get_settings():
+    """Read current `.env` values exposed through the settings API.
+
+    Returns:
+        dict: Key-value environment pairs, excluding commented lines.
+    """
     env_path = _runtime_root_dir() / ".env"
     if not env_path.exists():
         return {}
@@ -1853,6 +2431,14 @@ async def get_settings():
 
 @app.post("/settings")
 async def save_settings(payload: dict):
+    """Persist mutable settings to `.env` while blocking locked keys.
+
+    Parameters:
+        payload (dict): Requested key-value updates.
+
+    Returns:
+        dict: Operation result and blocked key list.
+    """
     safe_payload: dict[str, Any] = {}
     blocked: list[str] = []
     for k, v in (payload or {}).items():
@@ -1875,6 +2461,7 @@ async def bootstrap_status():
 
 @app.get("/local/behaviors")
 async def local_behaviors():
+    """Return user-defined local behaviors loaded from disk."""
     return _load_local_behaviors()
 
 
@@ -1882,6 +2469,7 @@ async def local_behaviors():
 
 @app.get("/harnesses/status")
 async def harnesses_status():
+    """Return harness installation status and active option metadata."""
     _reload_config_runtime()
     _ensure_harness_dirs()
     meta = _read_harness_meta()
@@ -1905,6 +2493,18 @@ async def harnesses_status():
 
 @app.post("/harnesses/install")
 async def harnesses_install(req: HarnessInstallRequest):
+    """Install supported harness tooling (`opencode`) via npm.
+
+    Parameters:
+        req (HarnessInstallRequest): Requested harness installation payload.
+
+    Returns:
+        dict: Installation result, detected binary, and version metadata.
+
+    Raises:
+        HTTPException: For unsupported harness IDs, missing npm, timeout, or
+        installation/discovery failures.
+    """
     _reload_config_runtime()
     _ensure_harness_dirs()
     harness_id = (req.harness_id or "").strip().lower()

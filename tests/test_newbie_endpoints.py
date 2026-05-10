@@ -7,6 +7,22 @@ from pathlib import Path
 
 
 class NewbieEndpointsTests(unittest.TestCase):
+    """Integration-style smoke tests for beginner-focused backend endpoints.
+
+    Purpose:
+        Verifies contract shape and basic round-trip behavior for onboarding,
+        profile, template, and health-center endpoints exposed by `agent_server`.
+
+    Parameters:
+        None.
+
+    Returns:
+        None.
+
+    Raises:
+        AssertionError: When endpoint responses do not match expected schema or
+        semantics.
+    """
     @classmethod
     def setUpClass(cls):
         cls._tmp_root = tempfile.mkdtemp(prefix="unlz-newbie-tests-")

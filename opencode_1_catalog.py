@@ -6,8 +6,23 @@ from typing import Any
 
 
 def load_opencode_1_profiles(path: str) -> list[dict[str, Any]]:
-    """
-    Load OpenCode launcher profiles and keep only top-level keys named `1_*`.
+    """Load and normalize OpenCode launcher profiles for `1_*` entries.
+
+    Purpose:
+        Reads a JSON profile map and extracts only top-level profiles whose key
+        starts with `1_`, returning a compact normalized structure used by the
+        backend launcher/catalog flow.
+
+    Parameters:
+        path (str): JSON file path containing profile definitions.
+
+    Returns:
+        list[dict[str, Any]]: Normalized profile list with `profile_name`,
+        `alias`, `opencode_model_id`, `model_folder`, and `ctx`.
+
+    Raises:
+        This function catches missing-file and JSON parse errors internally and
+        returns an empty list on invalid input.
     """
     p = Path(path)
     if not p.exists():

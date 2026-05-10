@@ -2,6 +2,23 @@ from config import Config
 
 
 def get_embeddings():
+    """Create the embeddings client configured for the active LLM provider.
+
+    Purpose:
+        Returns a provider-specific embeddings implementation compatible with
+        the current runtime configuration.
+
+    Parameters:
+        None.
+
+    Returns:
+        Any: Embeddings client instance (`OpenAIEmbeddings` or
+        `OllamaEmbeddings`).
+
+    Raises:
+        ImportError: If provider-specific dependencies are not installed.
+        Exception: Any provider client initialization error is propagated.
+    """
     if Config.LLM_PROVIDER == "openai":
         from langchain_openai import OpenAIEmbeddings
         return OpenAIEmbeddings(api_key=Config.OPENAI_API_KEY)
@@ -24,6 +41,22 @@ def get_embeddings():
 
 
 def get_vector_store():
+    """Create the vector store backend configured for the project.
+
+    Purpose:
+        Builds either Supabase or Chroma vector store using the embeddings
+        client returned by `get_embeddings()`.
+
+    Parameters:
+        None.
+
+    Returns:
+        Any: Configured vector store instance.
+
+    Raises:
+        ImportError: If required vector store dependencies are missing.
+        Exception: Backend client initialization failures are propagated.
+    """
     embeddings = get_embeddings()
 
     if Config.VECTOR_DB_PROVIDER == "supabase":

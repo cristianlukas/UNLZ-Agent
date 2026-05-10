@@ -5,6 +5,23 @@ from config import Config
 from rag_pipeline.factory import get_vector_store
 
 def ingest_documents():
+    """Ingest local PDF files into the configured vector database.
+
+    Purpose:
+        Executes end-to-end ingestion: load PDF files, split text into chunks,
+        generate embeddings, and upsert documents into the vector store.
+
+    Parameters:
+        None.
+
+    Returns:
+        None: Progress and error information is emitted through stdout.
+
+    Raises:
+        This function handles expected configuration/runtime errors internally
+        and returns early. Unexpected exceptions from third-party libraries can
+        still propagate.
+    """
     print(f"Starting Ingestion via Provider: {Config.VECTOR_DB_PROVIDER.upper()}")
     print(f"Checking for documents in: {Config.DATA_DIR}")
     
