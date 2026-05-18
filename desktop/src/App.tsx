@@ -23,6 +23,17 @@ export default function App() {
   const [onboardingStartingMcp, setOnboardingStartingMcp] = useState(false);
   const [onboardingMcpFeedback, setOnboardingMcpFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [warmupStatus, setWarmupStatus] = useState<{ status?: string; detail?: string } | null>(null);
+  const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  async function refreshOnboardingStatus(): Promise<OnboardingStatus | null> {
+    try {
+      const status = await getOnboardingHealth();
+      setOnboardingStatus(status);
+      return status;
+    } catch {
+      return null;
+    }
+  }
 
   useEffect(() => {
     let mounted = true;
@@ -97,8 +108,7 @@ export default function App() {
     setOnboardingFixing(true);
     try {
       await runOnboardingFix();
-      const status = await getOnboardingHealth();
-      setOnboardingStatus(status);
+      await refreshOnboardingStatus();
     } finally {
       setOnboardingFixing(false);
     }
@@ -113,13 +123,19 @@ export default function App() {
     setOnboardingStartingMcp(true);
     setOnboardingMcpFeedback(null);
     try {
-      const res = await startMcpServer();
-      const status = await getOnboardingHealth();
-      setOnboardingStatus(status);
-      if (res?.status === "started" || res?.status === "already_running" || res?.status === "starting") {
+      await startMcpServer();
+      let latest = await refreshOnboardingStatus();
+      for (let i = 0; i < 8; i += 1) {
+        const mcp = latest?.checks?.find((c) => c.id === "mcp_port");
+        if (mcp?.status === "ok") break;
+        await sleep(700);
+        latest = await refreshOnboardingStatus();
+      }
+      const mcp = latest?.checks?.find((c) => c.id === "mcp_port");
+      if (mcp?.status === "ok") {
         setOnboardingMcpFeedback({ type: "success", text: "MCP iniciado correctamente." });
       } else {
-        setOnboardingMcpFeedback({ type: "error", text: "No se pudo confirmar el inicio de MCP." });
+        setOnboardingMcpFeedback({ type: "error", text: "MCP se inició pero no respondió en puerto 8000." });
       }
     } catch {
       setOnboardingMcpFeedback({ type: "error", text: "Error al intentar iniciar MCP." });

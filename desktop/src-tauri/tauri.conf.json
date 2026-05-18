@@ -33,6 +33,7 @@
     "targets": ["nsis"],
     "resources": [
       "binaries/agent_server.exe",
+      "binaries/mcp_server.exe",
       "icons/icon.ico",
       "binaries/llama.cpp"
     ],

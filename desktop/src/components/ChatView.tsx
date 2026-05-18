@@ -4,7 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { cancelRun, getBootstrapStatus, getSettings, getTaskTemplates, runApprovedWindowsCommand, saveSettings, streamChat, uploadFolderFile } from "../lib/api";
+import { cancelRun, getBootstrapStatus, getOpencodeWarmupStatus, getSettings, getTaskTemplates, runApprovedWindowsCommand, saveSettings, streamChat, uploadFolderFile } from "../lib/api";
 import type { TaskTemplate } from "../lib/types";
 import type { AgentStep, ChatMessage } from "../lib/types";
 import { useStore, useActiveConv, useActiveBehavior, useActiveFolder } from "../lib/store";
@@ -831,6 +831,8 @@ function ActiveChat({ convId }: { convId: string }) {
   const [bootstrapHint, setBootstrapHint] = useState<string>("");
   const [bootstrapProgress, setBootstrapProgress] = useState<number | null>(null);
   const [bootstrapTransferHint, setBootstrapTransferHint] = useState<string>("");
+  const [warmupHint, setWarmupHint] = useState<string>("");
+  const [warmupRunning, setWarmupRunning] = useState(false);
   const [timeline, setTimeline] = useState<string>("");
   const [templates, setTemplates] = useState<TaskTemplate[]>([]);
 
@@ -851,7 +853,7 @@ function ActiveChat({ convId }: { convId: string }) {
   const uiStreaming = isStreaming || hasPendingAssistant;
   const uiLocked = !agentReady || !llmReady || uiStreaming;
   const lockMessage = !agentReady
-    ? "Iniciando agente…"
+    ? (warmupRunning ? `Iniciando agente… ${warmupHint || "Warmup en progreso…"}` : "Iniciando agente…")
     : !llmReady
       ? (bootstrapHint || "Cargando modelo…")
       : uiStreaming
@@ -993,6 +995,34 @@ function ActiveChat({ convId }: { convId: string }) {
         }
       });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let stop = false;
+    let timer: number | null = null;
+    async function tickWarmup() {
+      const st = await getOpencodeWarmupStatus();
+      if (stop || !st) return;
+      const status = String(st.status || "").toLowerCase();
+      if (status === "running") {
+        setWarmupRunning(true);
+        setWarmupHint(String(st.detail || "").trim() || "Warmup en progreso…");
+      } else if (status === "ready") {
+        setWarmupRunning(false);
+        setWarmupHint("Warmup listo.");
+      } else if (status === "error") {
+        setWarmupRunning(false);
+        setWarmupHint(String(st.detail || "").trim() || "Warmup con error.");
+      } else {
+        setWarmupRunning(false);
+      }
+    }
+    void tickWarmup();
+    timer = window.setInterval(() => { void tickWarmup(); }, 1500);
+    return () => {
+      stop = true;
+      if (timer !== null) window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -1840,6 +1870,16 @@ function ActiveChat({ convId }: { convId: string }) {
                 <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
                   <span>{Math.round(bootstrapProgress * 100)}%</span>
                   <span>{bootstrapTransferHint || "Descargando…"}</span>
+                </div>
+              </div>
+            )}
+            {bootstrapProgress === null && !llmReady && warmupRunning && (
+              <div className="mt-2">
+                <div className="h-2 w-full rounded bg-base border border-border overflow-hidden">
+                  <div className="h-full w-1/3 bg-accent animate-pulse" />
+                </div>
+                <div className="mt-1 text-[10px] text-muted">
+                  {warmupHint || "Warmup en progreso…"}
                 </div>
               </div>
             )}

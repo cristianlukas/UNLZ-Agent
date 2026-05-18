@@ -20,9 +20,15 @@ set "OUT_DIR=%ROOT%dist-single-exe"
 set "ROOT_SETUP=%ROOT%UNLZ-Agent-Setup.exe"
 set "AGENT_SCRIPT=%ROOT%agent_server.py"
 set "AGENT_EXE=%BIN_DIR%\agent_server.exe"
+set "MCP_SCRIPT=%ROOT%mcp_server.py"
+set "MCP_EXE=%BIN_DIR%\mcp_server.exe"
 
 if not exist "%AGENT_SCRIPT%" (
   echo [ERROR] agent_server.py not found.
+  exit /b 1
+)
+if not exist "%MCP_SCRIPT%" (
+  echo [ERROR] mcp_server.py not found.
   exit /b 1
 )
 
@@ -61,6 +67,18 @@ if errorlevel 1 (
 
 if not exist "%AGENT_EXE%" (
   echo [ERROR] Sidecar not produced at "%AGENT_EXE%".
+  exit /b 1
+)
+
+echo ==> Building MCP sidecar (mcp_server.exe)
+"%PYTHON%" -m PyInstaller "%MCP_SCRIPT%" --onefile --name mcp_server --distpath "%BIN_DIR%" --workpath "%ROOT%build\_pyinstaller" --specpath "%ROOT%build\_pyinstaller" --noconfirm --log-level WARN
+if errorlevel 1 (
+  echo [ERROR] PyInstaller failed for mcp_server.
+  exit /b 1
+)
+
+if not exist "%MCP_EXE%" (
+  echo [ERROR] Sidecar not produced at "%MCP_EXE%".
   exit /b 1
 )
 

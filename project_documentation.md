@@ -1,6 +1,6 @@
 # Project Documentation — UNLZ Agent
 
-> Memoria técnica del proyecto. Última actualización: 2026-05-02.
+> Memoria técnica del proyecto. Última actualización: 2026-05-11.
 
 ---
 
@@ -53,6 +53,8 @@ Vars de entorno en `.env.example` y `config.py`.
 | `LLAMACPP_CONTEXT_SIZE` | `8192` | Tamaño de contexto |
 | `LLAMACPP_N_GPU_LAYERS` | `999` | Capas en GPU |
 | `LLAMACPP_FLASH_ATTN` | — | Flash attention |
+| `LLAMACPP_CACHE_TYPE_K` | — | KV cache quant para keys (`-ctk`) |
+| `LLAMACPP_CACHE_TYPE_V` | — | KV cache quant para values (`-ctv`) |
 | `LLAMACPP_EXTRA_ARGS` | — | Args adicionales para llama.cpp |
 | `LLAMACPP_MODELS_DIR` | — | Directorio de modelos GGUF |
 | `UNLZ_PROJECT_ROOT` | — | Override del directorio raíz |
@@ -162,6 +164,13 @@ npx tsc --noEmit --project desktop/tsconfig.json
 
 ## Decisiones técnicas recientes
 
+- **2026-05-11**: Logging crudo por corrida para `opencode`: cada `run_id` guarda `stdout/stderr` en `data/.unlz_internal/opencode_raw/<run_id>.log` para depurar variantes de parsing y eventos JSON.
+- **2026-05-11**: Warmup optimizado para arranque bloqueante: ya no ejecuta `opencode run`; ahora sondea `llama.cpp /v1/chat/completions` hasta que responde con `choices`, reduciendo warmup de minutos a un ciclo de readiness real del modelo.
+- **2026-05-11**: Precheck de readiness antes de cada chat: `OPENCODE_PRECHAT_READY_TIMEOUT_SEC` evita disparar `opencode` mientras `llama.cpp` sigue en `Loading model`, mitigando `empty completion`.
+- **2026-05-11**: Bootstrap hardware persistente: en primer arranque selecciona perfil por hardware y marca `UNLZ_BOOTSTRAP_INITIALIZED=true`; en arranques siguientes prioriza el perfil `UNLZ_SELECTED_1_PROFILE` ya elegido para evitar cambios inesperados.
+- **2026-05-11**: Warmup de inicio bloqueante: si `UNLZ_OPENCODE_WARMUP_ON_STARTUP=1`, el backend espera a completar warmup antes de quedar operativo para chat, reduciendo timeouts de primer token por modelo en frío.
+- **2026-05-11**: Fix de empaquetado MCP en instalador: `4_build_exe.bat` ahora genera `binaries/mcp_server.exe` y el endpoint `/system/mcp/start` usa `mcp_server.exe` en runtime instalado (fallback a `mcp_server.py` en dev).
+- **2026-05-11**: Integración de perfiles `1_*` de OpenCode para runtime llama.cpp: bootstrap ahora importa `llama_server_path`, `extra_args`, KV quant (`ctk/ctv`) y flags de cache/metrics/mlock/no_mmap/no_warmup, y los aplica automáticamente en `LLAMACPP_EXECUTABLE` + `LLAMACPP_EXTRA_ARGS`.
 - **2026-05-02**: Refactor a opencode-only. Removido: multi-provider, multi-harness, task router, model hub, RAG pipeline, advanced mode, plan/iterate modes. agent_server.py: ~8765 → ~2154 líneas
 - **2026-05-02**: Bootstrap automático: hardware detection, model download, config generation, warmup
 - **2026-05-02**: Home directory aislado para opencode: `data/.unlz_internal/opencode_home/`

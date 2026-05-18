@@ -17,8 +17,8 @@ def load_opencode_1_profiles(path: str) -> list[dict[str, Any]]:
         path (str): JSON file path containing profile definitions.
 
     Returns:
-        list[dict[str, Any]]: Normalized profile list with `profile_name`,
-        `alias`, `opencode_model_id`, `model_folder`, and `ctx`.
+        list[dict[str, Any]]: Normalized profile list with core model fields
+        plus llama.cpp runtime tuning fields used by UNLZ bootstrap.
 
     Raises:
         This function catches missing-file and JSON parse errors internally and
@@ -46,5 +46,21 @@ def load_opencode_1_profiles(path: str) -> list[dict[str, Any]]:
             "opencode_model_id": str(cfg.get("opencode_model_id") or "").strip(),
             "model_folder": str(cfg.get("model_folder") or "").strip(),
             "ctx": int(cfg.get("ctx") or 131072),
+            "llama_server_path": str(cfg.get("llama_server_path") or "").strip(),
+            "llama_backend": str(cfg.get("llama_backend") or "").strip(),
+            "extra_args": str(cfg.get("extra_args") or "").strip(),
+            "ctk": str(cfg.get("ctk") or "").strip(),
+            "ctv": str(cfg.get("ctv") or "").strip(),
+            "gpu_layers": cfg.get("gpu_layers"),
+            "batch_size": cfg.get("batch_size"),
+            "ubatch_size": cfg.get("ubatch_size"),
+            "threads": cfg.get("threads"),
+            "cache_ram_mb": cfg.get("cache_ram_mb"),
+            "cache_reuse": cfg.get("cache_reuse"),
+            "cache_reuse_tokens": cfg.get("cache_reuse_tokens"),
+            "no_warmup": cfg.get("no_warmup"),
+            "metrics": cfg.get("metrics"),
+            "mlock": cfg.get("mlock"),
+            "no_mmap": cfg.get("no_mmap"),
         })
     return out

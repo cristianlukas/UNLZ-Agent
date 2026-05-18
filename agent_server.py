@@ -10,6 +10,7 @@ import http.client
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -188,17 +189,29 @@ def _select_bundled_llama_server() -> str:
     """Find the bundled llama-server executable.
 
     Searches in priority order:
-    1. tools/llama.cpp/opencode-mtp/llama-server.exe
-    2. llama.cpp/llama-server.exe
-    3. llama.cpp/b*/llama-server.exe (latest build directory)
+    1. binaries/llama.cpp/llama-server.exe (installer/runtime)
+    2. tools/llama.cpp/opencode-mtp/llama-server.exe
+    3. tools/llama.cpp/opencode-turboquant/llama-server.exe
+    4. tools/llama.cpp/turboquant/llama-server.exe
+    5. llama.cpp/llama-server.exe
+    6. llama.cpp/b*/llama-server.exe (latest build directory)
 
     Returns:
         Absolute path to the executable, or empty string if not found.
     """
     root = _runtime_root_dir()
+    installed = root / "binaries" / "llama.cpp" / "llama-server.exe"
+    if installed.exists():
+        return str(installed)
     opencode_mtp = root / "tools" / "llama.cpp" / "opencode-mtp" / "llama-server.exe"
     if opencode_mtp.exists():
         return str(opencode_mtp)
+    opencode_turboquant = root / "tools" / "llama.cpp" / "opencode-turboquant" / "llama-server.exe"
+    if opencode_turboquant.exists():
+        return str(opencode_turboquant)
+    turboquant = root / "tools" / "llama.cpp" / "turboquant" / "llama-server.exe"
+    if turboquant.exists():
+        return str(turboquant)
     explicit = root / "llama.cpp" / "llama-server.exe"
     if explicit.exists():
         return str(explicit)
@@ -208,6 +221,58 @@ def _select_bundled_llama_server() -> str:
         return ""
     cands = sorted([p for p in llroot.glob("b*/llama-server.exe") if p.exists()], reverse=True)
     return str(cands[0]) if cands else ""
+
+
+def _split_cli_args(raw: str) -> list[str]:
+    """Split extra args preserving quoted values on Windows and POSIX."""
+    txt = (raw or "").strip()
+    if not txt:
+        return []
+    try:
+        return shlex.split(txt, posix=False)
+    except Exception:
+        return txt.split()
+
+
+def _compose_profile_extra_args(profile: dict[str, Any] | None) -> str:
+    """Build LLAMACPP_EXTRA_ARGS from a launcher profile."""
+    if not isinstance(profile, dict):
+        return ""
+    parts = _split_cli_args(str(profile.get("extra_args") or ""))
+    joined = " ".join(parts).lower()
+
+    def _has_flag(flag: str) -> bool:
+        return flag.lower() in joined
+
+    ctk = str(profile.get("ctk") or "").strip()
+    ctv = str(profile.get("ctv") or "").strip()
+    if ctk and not _has_flag("-ctk"):
+        parts.extend(["-ctk", ctk])
+    if ctv and not _has_flag("-ctv"):
+        parts.extend(["-ctv", ctv])
+
+    cache_ram_mb = profile.get("cache_ram_mb")
+    if isinstance(cache_ram_mb, int) and cache_ram_mb >= 0 and not _has_flag("--cache-ram"):
+        parts.extend(["--cache-ram", str(cache_ram_mb)])
+
+    if bool(profile.get("cache_reuse")) and not _has_flag("--cache-reuse"):
+        tok = profile.get("cache_reuse_tokens")
+        try:
+            tok_i = int(tok) if tok is not None else 256
+        except Exception:
+            tok_i = 256
+        parts.extend(["--cache-reuse", str(max(1, tok_i))])
+
+    if bool(profile.get("no_warmup")) and not _has_flag("--no-warmup"):
+        parts.append("--no-warmup")
+    if bool(profile.get("metrics")) and not _has_flag("--metrics"):
+        parts.append("--metrics")
+    if bool(profile.get("mlock")) and not _has_flag("--mlock"):
+        parts.append("--mlock")
+    if bool(profile.get("no_mmap")) and not _has_flag("--no-mmap"):
+        parts.append("--no-mmap")
+
+    return " ".join(parts).strip()
 
 
 def _detect_hardware_tier() -> tuple[str, float, float]:
@@ -525,6 +590,19 @@ _OPENCODE_WARMUP_STATE: dict[str, Any] = {
 _OPENCODE_WARMUP_LOCK = threading.Lock()
 
 
+def _find_plan_by_profile_name(plan: dict[str, Any], profile_name: str) -> dict[str, Any] | None:
+    """Find a hardware-plan entry by its `profile_name` value."""
+    needle = (profile_name or "").strip()
+    if not needle or not isinstance(plan, dict):
+        return None
+    for entry in plan.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("profile_name") or "").strip() == needle:
+            return entry
+    return None
+
+
 def _bootstrap_locked_runtime() -> None:
     """Initialize the runtime: force config, detect hardware, select/download model.
 
@@ -557,7 +635,13 @@ def _bootstrap_locked_runtime() -> None:
     tier, vram, ram = _detect_hardware_tier()
     bucket = _hardware_bucket(vram)
     plan = _read_hardware_plan()
-    selected_plan = plan.get(bucket) if isinstance(plan, dict) else None
+    pinned_profile = str(os.getenv("UNLZ_SELECTED_1_PROFILE") or "").strip()
+    initialized = (os.getenv("UNLZ_BOOTSTRAP_INITIALIZED") or "").strip().lower() in ("1", "true", "yes", "on")
+    selected_plan = None
+    if initialized and pinned_profile:
+        selected_plan = _find_plan_by_profile_name(plan, pinned_profile)
+    if not isinstance(selected_plan, dict):
+        selected_plan = plan.get(bucket) if isinstance(plan, dict) else None
     if not isinstance(selected_plan, dict):
         _BOOTSTRAP_STATE.update({"status": "error", "detail": f"No hay plan para bucket '{bucket}'"})
         return
@@ -578,15 +662,27 @@ def _bootstrap_locked_runtime() -> None:
     model_folder = chosen_target["model_folder"] or alias
     hf_repo = chosen_target["hf_repo"]
     filename = chosen_target["filename"]
+    profile_server_path = str((selected_profile or {}).get("llama_server_path") or "").strip()
+    profile_extra_args = _compose_profile_extra_args(selected_profile)
+    effective_exe = (
+        profile_server_path if (profile_server_path and Path(profile_server_path).exists())
+        else (bundled or str(os.getenv("LLAMACPP_EXECUTABLE") or "").strip())
+    )
 
     model_path = models_dir / model_folder / filename
-    _upsert_env_settings({
+    boot_env = {
         "LLAMACPP_MODEL_PATH": str(model_path),
         "LLAMACPP_MODEL_ALIAS": alias,
         "UNLZ_SELECTED_1_PROFILE": selected_profile_name,
         "UNLZ_BOOTSTRAP_TIER": tier,
         "UNLZ_BOOTSTRAP_BUCKET": bucket,
-    })
+        "UNLZ_BOOTSTRAP_INITIALIZED": "true",
+    }
+    if effective_exe and Path(effective_exe).exists():
+        boot_env["LLAMACPP_EXECUTABLE"] = effective_exe
+    if profile_extra_args:
+        boot_env["LLAMACPP_EXTRA_ARGS"] = profile_extra_args
+    _upsert_env_settings(boot_env)
 
     expected_sha = str(chosen_target.get("sha256") or "").strip().lower()
     if model_path.exists():
@@ -652,14 +748,19 @@ def _bootstrap_locked_runtime() -> None:
                 if got_sha != cand_sha:
                     cand_path.unlink(missing_ok=True)
                     raise RuntimeError(f"SHA256 mismatch descarga ({got_sha} != {cand_sha})")
-            _upsert_env_settings({
+            cand_env = {
                 "LLAMACPP_MODEL_PATH": str(cand_path),
                 "LLAMACPP_MODEL_ALIAS": cand_alias,
                 "UNLZ_MODEL_SOURCE_REPO": cand["hf_repo"],
                 "UNLZ_MODEL_SOURCE_FILE": cand["filename"],
                 "UNLZ_MODEL_FALLBACK_INDEX": str(idx),
                 "UNLZ_MODEL_MTP_ACTIVE": "true" if ("mtp" in cand_alias.lower() or "mtp" in cand["filename"].lower()) else "false",
-            })
+            }
+            if effective_exe and Path(effective_exe).exists():
+                cand_env["LLAMACPP_EXECUTABLE"] = effective_exe
+            if profile_extra_args:
+                cand_env["LLAMACPP_EXTRA_ARGS"] = profile_extra_args
+            _upsert_env_settings(cand_env)
             _BOOTSTRAP_STATE.update({
                 "status": "ready",
                 "detail": "Modelo descargado." if idx == 0 else f"Modelo descargado con fallback #{idx}.",
@@ -796,6 +897,9 @@ def _ensure_llamacpp_server_started(timeout_sec: int = 25) -> tuple[bool, str]:
     port = (os.getenv("LLAMACPP_PORT") or "8081").strip() or "8081"
     ctx = (os.getenv("LLAMACPP_CONTEXT_SIZE") or "8192").strip() or "8192"
     extra = (os.getenv("LLAMACPP_EXTRA_ARGS") or "").strip()
+    n_gpu_layers = (os.getenv("LLAMACPP_N_GPU_LAYERS") or "").strip()
+    cache_type_k = (os.getenv("LLAMACPP_CACHE_TYPE_K") or "").strip()
+    cache_type_v = (os.getenv("LLAMACPP_CACHE_TYPE_V") or "").strip()
     if not exe or not Path(exe).exists():
         return False, "LLAMACPP_EXECUTABLE no configurado o inexistente"
     if not model_path or not Path(model_path).exists():
@@ -816,10 +920,16 @@ def _ensure_llamacpp_server_started(timeout_sec: int = 25) -> tuple[bool, str]:
             _LLAMA_SERVER_PROC = None
 
         args = [exe, "-m", model_path, "--host", host, "--port", port, "-c", ctx]
+        if n_gpu_layers:
+            args.extend(["-ngl", n_gpu_layers])
+        if cache_type_k:
+            args.extend(["-ctk", cache_type_k])
+        if cache_type_v:
+            args.extend(["-ctv", cache_type_v])
         if (os.getenv("LLAMACPP_FLASH_ATTN") or "").strip().lower() in ("1", "true", "yes", "on"):
             args.extend(["--flash-attn", "on"])
         if extra:
-            args.extend(extra.split())
+            args.extend(_split_cli_args(extra))
         env = os.environ.copy()
         exe_parent = str(Path(exe).resolve().parent)
         env["PATH"] = exe_parent + os.pathsep + env.get("PATH", "")
@@ -888,67 +998,105 @@ def _stop_llamacpp_server() -> None:
 def _run_opencode_warmup_once() -> dict[str, Any]:
     """Run a single opencode warmup to pre-load the model.
 
-    Ensures llama.cpp is started, then runs opencode with a short prompt
-    to trigger model loading. Uses isolated home directory and config.
+    Ensures llama.cpp is started, then probes llama.cpp chat/completions
+    directly until the model is fully ready.
 
     Returns:
         Dict with keys: status ('ready'/'error'), detail, started_at, finished_at.
     """
     started_at = datetime.now().isoformat(timespec="seconds")
-    bin_path = _opencode_bin()
-    if not bin_path:
-        return {"status": "error", "detail": "opencode no instalado", "started_at": started_at, "finished_at": datetime.now().isoformat(timespec="seconds")}
     ok, reason = _ensure_llamacpp_server_started(timeout_sec=40)
     if not ok:
         return {"status": "error", "detail": f"llama.cpp no listo: {reason}", "started_at": started_at, "finished_at": datetime.now().isoformat(timespec="seconds")}
+    model = (os.getenv("LLAMACPP_MODEL_ALIAS") or "local-model").strip() or "local-model"
+    base = _llamacpp_server_url().rstrip("/")
+    url = f"{base}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": False,
+    }
+    warmup_deadline = time.time() + int(os.getenv("OPENCODE_WARMUP_TIMEOUT_SEC", "480"))
+    attempt = 0
+    last_detail = ""
+    while time.time() < warmup_deadline:
+        attempt += 1
+        with _OPENCODE_WARMUP_LOCK:
+            _OPENCODE_WARMUP_STATE.update({
+                "status": "running",
+                "detail": f"warmup: cargando modelo (intento {attempt})",
+            })
+        try:
+            req = Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=20) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            data = json.loads(body) if body.strip().startswith("{") else {}
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if isinstance(choices, list) and choices:
+                return {
+                    "status": "ready",
+                    "detail": f"warmup completado (attempt {attempt})",
+                    "started_at": started_at,
+                    "finished_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            last_detail = "respuesta sin choices"
+        except Exception as exc:
+            msg = str(exc)
+            last_detail = msg[:240]
+            # Expected transient state while model is loading.
+            if "503" not in msg and "Loading model" not in msg:
+                time.sleep(0.8)
+                continue
+        time.sleep(0.8)
 
-    local_cfg = _ensure_opencode_local_config()
-    local_home = _opencode_local_home_dir()
-    args = [bin_path, "run", "--dir", str(_runtime_root_dir())]
-    if _opencode_supports_flag("--dangerously-skip-permissions"):
-        args.append("--dangerously-skip-permissions")
-    if _opencode_supports_flag("--format"):
-        args.extend(["--format", "json"])
-    args.append("Warmup run. Reply with a short OK.")
+    return {
+        "status": "error",
+        "detail": f"warmup timeout: {last_detail}",
+        "started_at": started_at,
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
-    env = os.environ.copy()
-    env["NO_COLOR"] = "1"
-    env["TERM"] = "dumb"
-    env["HOME"] = str(local_home)
-    env["USERPROFILE"] = str(local_home)
-    env["XDG_CONFIG_HOME"] = str(local_home / ".config")
-    env["UNLZ_OPENCODE_CONFIG"] = str(local_cfg)
 
-    try:
-        proc = subprocess.run(
-            args,
-            cwd=str(_runtime_root_dir()),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=int(os.getenv("OPENCODE_WARMUP_TIMEOUT_SEC", "480")),
-        )
-        stderr = _strip_ansi((proc.stderr or "").strip())
-        if proc.returncode == 0:
-            return {
-                "status": "ready",
-                "detail": "warmup completado",
-                "started_at": started_at,
-                "finished_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        return {
-            "status": "error",
-            "detail": f"warmup rc={proc.returncode} {stderr[:300]}",
-            "started_at": started_at,
-            "finished_at": datetime.now().isoformat(timespec="seconds"),
-        }
-    except Exception as exc:
-        return {
-            "status": "error",
-            "detail": f"warmup exception: {exc}",
-            "started_at": started_at,
-            "finished_at": datetime.now().isoformat(timespec="seconds"),
-        }
+def _llamacpp_wait_ready(timeout_sec: int = 90) -> tuple[bool, str]:
+    """Wait until llama.cpp answers chat/completions with a valid payload."""
+    model = (os.getenv("LLAMACPP_MODEL_ALIAS") or "local-model").strip() or "local-model"
+    base = _llamacpp_server_url().rstrip("/")
+    url = f"{base}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": False,
+    }
+    deadline = time.time() + max(5, int(timeout_sec))
+    last = ""
+    while time.time() < deadline:
+        try:
+            req = Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=20) as r:
+                body = r.read().decode("utf-8", errors="replace")
+            data = json.loads(body) if body.strip().startswith("{") else {}
+            choices = data.get("choices") if isinstance(data, dict) else None
+            if isinstance(choices, list) and choices:
+                return True, "ready"
+            last = "respuesta sin choices"
+        except Exception as exc:
+            last = str(exc)[:220]
+        time.sleep(0.8)
+    return False, last or "timeout"
 
 
 # ── Data paths ────────────────────────────────────────────────────────────────
@@ -1009,6 +1157,20 @@ def _persist_trace(run_id: str, trace: dict) -> None:
 def _log_path() -> Path:
     """Return the absolute path of the backend log file."""
     return _runtime_root_dir() / "agent_server.log"
+
+
+def _ts_hms_ms() -> str:
+    """Return local timestamp as HH:MM:SS.mmm for dev diagnostics."""
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def _devlog(line: str) -> None:
+    """Append one timestamped diagnostic line to agent_server.log."""
+    try:
+        with _log_path().open("a", encoding="utf-8", errors="replace") as fh:
+            fh.write(f"[{_ts_hms_ms()}] {line}\n")
+    except Exception:
+        pass
 
 
 def _newbie_profile_path() -> Path:
@@ -1595,6 +1757,7 @@ async def _opencode_stream(
     tools_mode: str = "auto",
     llamacpp_overrides: Optional[dict[str, Any]] = None,
     cancel_event: Optional[asyncio.Event] = None,
+    run_id: str = "",
 ) -> AsyncGenerator[str, None]:
     """Execute opencode as a subprocess and stream output as SSE events.
 
@@ -1630,8 +1793,12 @@ async def _opencode_stream(
     Raises:
         No exceptions — errors are yielded as SSE error events.
     """
+    run_tag = run_id or "no-run-id"
+    t0 = time.time()
+    _devlog(f"[run:{run_tag}] stream.start mode={mode} tools_mode={tools_mode} internet={internet_enabled}")
     bin_path = _opencode_bin()
     if not bin_path:
+        _devlog(f"[run:{run_tag}] stream.fail opencode_bin_missing")
         yield _sse({"type": "error", "text": "opencode no instalado o no encontrado en PATH. Instalá con: npm i -g opencode-ai"})
         yield _sse({"type": "done"})
         return
@@ -1647,6 +1814,7 @@ async def _opencode_stream(
         workdir_path = _runtime_root_dir().resolve()
 
     workdir = str(workdir_path)
+    _devlog(f"[run:{run_tag}] workdir={workdir}")
 
     local_cfg = _ensure_opencode_local_config()
     local_home = _opencode_local_home_dir()
@@ -1670,6 +1838,19 @@ async def _opencode_stream(
             })
             yield _sse({"type": "done"})
             return
+    # Even if HTTP is reachable, the model may still be loading.
+    ready_ok, ready_reason = _llamacpp_wait_ready(
+        timeout_sec=int(os.getenv("OPENCODE_PRECHAT_READY_TIMEOUT_SEC", "120"))
+    )
+    if not ready_ok:
+        _devlog(f"[run:{run_tag}] prechat.not_ready reason={ready_reason}")
+        yield _sse({
+            "type": "error",
+            "text": f"llama.cpp aún cargando modelo. Reintentá en unos segundos. Detalle: {ready_reason}",
+        })
+        yield _sse({"type": "done"})
+        return
+    _devlog(f"[run:{run_tag}] prechat.ready ok")
 
     exec_mode = (getattr(Config, "AGENT_EXECUTION_MODE", "autonomous") or "autonomous").strip().lower()
     if exec_mode == "confirm":
@@ -1681,6 +1862,11 @@ async def _opencode_stream(
         return
 
     prompt = _build_opencode_prompt(message, history, system_prompt, mode, internet_enabled, tools_mode)
+    prompt_preview = prompt[:1000].replace("\n", "\\n")
+    _devlog(
+        f"[run:{run_tag}] prompt.ready chars={len(prompt)} history_items={len(history)} "
+        f"preview=\"{prompt_preview}\""
+    )
     mo = (model_override or "").strip()
 
     args = [bin_path, "run", "--dir", workdir]
@@ -1728,18 +1914,85 @@ async def _opencode_stream(
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        _devlog(f"[run:{run_tag}] process.spawn pid={proc.pid} cmd={' '.join(args[:6])}...")
     except Exception as e:
+        _devlog(f"[run:{run_tag}] process.spawn_error err={e}")
         yield _sse({"type": "error", "text": f"No se pudo iniciar opencode: {e}"})
         yield _sse({"type": "done"})
         return
 
     emitted = False
     first_chunk_emitted = False
+    first_stdout_event_seen = False
     first_chunk_elapsed_ms: Optional[int] = None
+    first_queue_event_elapsed_ms: Optional[int] = None
+    first_stderr_elapsed_ms: Optional[int] = None
     stderr_seen: list[str] = []
     migration_in_progress = False
     queue: asyncio.Queue[tuple[str, bytes]] = asyncio.Queue()
     stdout_buf = ""
+    raw_log_fh = None
+    if run_id:
+        try:
+            raw_dir = _unlz_internal_dir() / "opencode_raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_log_fh = open(raw_dir / f"{run_id}.log", "a", encoding="utf-8", errors="replace")
+            raw_log_fh.write(f"[{datetime.now().isoformat(timespec='seconds')}] run_id={run_id}\n")
+            raw_log_fh.write(f"CMD: {' '.join(args)}\n")
+            raw_log_fh.flush()
+        except Exception:
+            raw_log_fh = None
+
+    def _extract_text_from_payload(obj: Any) -> str:
+        if isinstance(obj, str):
+            txt = obj.strip()
+            low = txt.lower()
+            if not txt:
+                return ""
+            # Ignore protocol/control marker strings and id-like values.
+            if low in ("text", "step_start", "step_finish", "step-start", "step-finish", "delta", "message"):
+                return ""
+            if txt.startswith(("ses_", "msg_", "prt_")):
+                return ""
+            return txt
+        if isinstance(obj, dict):
+            # opencode commonly nests actual text under `part`.
+            if "part" in obj:
+                found = _extract_text_from_payload(obj.get("part"))
+                if found:
+                    return found
+            for key in ("text", "content", "message", "delta"):
+                if key in obj:
+                    found = _extract_text_from_payload(obj.get(key))
+                    if found:
+                        return found
+            for key, value in obj.items():
+                if key in ("type", "timestamp", "sessionID", "id", "messageID"):
+                    continue
+                found = _extract_text_from_payload(value)
+                if found:
+                    return found
+            return ""
+        if isinstance(obj, list):
+            for item in obj:
+                found = _extract_text_from_payload(item)
+                if found:
+                    return found
+        return ""
+
+    def _sanitize_opencode_text(raw: str) -> str:
+        """Drop internal stream markers accidentally exposed as text."""
+        txt = (raw or "").strip()
+        if not txt:
+            return ""
+        lowered = txt.lower()
+        # Some opencode event payloads can leak protocol markers instead of user text.
+        if re.fullmatch(r"(step_start|step_finish|text|delta|message)+", lowered):
+            return ""
+        txt = re.sub(r"(?i)step_start|step_finish", "", txt).strip()
+        if txt.lower() in ("text", "delta", "message"):
+            return ""
+        return txt
 
     async def _pump_pipe(pipe, name: str):
         if pipe is None:
@@ -1782,28 +2035,43 @@ async def _opencode_stream(
                 name, raw = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 # Cold starts can be slow on local models (load/warmup/download). Use safer defaults.
-                first_chunk_timeout = int(os.getenv("OPENCODE_FIRST_CHUNK_TIMEOUT_SEC", "35"))
+                first_chunk_timeout = int(os.getenv("OPENCODE_FIRST_CHUNK_TIMEOUT_SEC", "180"))
                 if str((_BOOTSTRAP_STATE or {}).get("status") or "") in ("running", "downloading"):
                     first_chunk_timeout = max(first_chunk_timeout, 600)
                 if migration_in_progress:
                     first_chunk_timeout = max(first_chunk_timeout, 420)
-                if not first_chunk_emitted and (time.time() - started_waiting_at > first_chunk_timeout):
+                if not first_stdout_event_seen and not first_chunk_emitted and (time.time() - started_waiting_at > first_chunk_timeout):
                     if proc.returncode is None:
                         _kill_pid_tree(proc.pid)
+                    _devlog(f"[run:{run_tag}] timeout.first_token sec={first_chunk_timeout}")
                     yield _sse({"type": "error", "text": f"opencode timeout esperando primer token ({first_chunk_timeout}s)."})
                     break
                 silent_timeout = int(os.getenv("OPENCODE_SILENT_TIMEOUT_SEC", "900"))
                 if time.time() - last_output_at > silent_timeout:
                     if proc.returncode is None:
                         _kill_pid_tree(proc.pid)
+                    _devlog(f"[run:{run_tag}] timeout.silent sec={silent_timeout}")
                     yield _sse({"type": "error", "text": f"opencode timeout ({silent_timeout}s sin salida)."})
                     break
                 continue
 
             last_output_at = time.time()
+            if first_queue_event_elapsed_ms is None:
+                first_queue_event_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                _devlog(f"[run:{run_tag}] first.queue_event ms={first_queue_event_elapsed_ms} source={name}")
             text = _strip_ansi(raw.decode("utf-8", errors="ignore")).replace("\r", "\n")
+            if raw_log_fh is not None:
+                try:
+                    raw_text = raw.decode("utf-8", errors="replace")
+                    raw_log_fh.write(f"[{datetime.now().isoformat(timespec='seconds')}] {name}: {raw_text}\n")
+                    raw_log_fh.flush()
+                except Exception:
+                    pass
 
             if name == "stderr":
+                if first_stderr_elapsed_ms is None:
+                    first_stderr_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                    _devlog(f"[run:{run_tag}] first.stderr ms={first_stderr_elapsed_ms}")
                 stderr_seen.append(text)
                 line = text.strip()
                 low_line = line.lower()
@@ -1820,6 +2088,7 @@ async def _opencode_stream(
                 clean = ln.strip()
                 if not clean:
                     continue
+                first_stdout_event_seen = True
                 parsed: dict[str, Any] | None = None
                 if clean.startswith("{") and clean.endswith("}"):
                     try:
@@ -1828,42 +2097,51 @@ async def _opencode_stream(
                         parsed = None
                 if parsed is not None:
                     et = str(parsed.get("type") or "").strip().lower()
-                    txt = ""
-                    for k in ("text", "content", "message", "delta"):
-                        v = parsed.get(k)
-                        if isinstance(v, str) and v.strip():
-                            txt = v
-                            break
-                    if not txt:
-                        data_v = parsed.get("data")
-                        if isinstance(data_v, dict):
-                            for k in ("text", "content", "delta", "message"):
-                                vv = data_v.get(k)
-                                if isinstance(vv, str) and vv.strip():
-                                    txt = vv
-                                    break
+                    txt = _extract_text_from_payload(parsed)
                     if et in ("tool", "tool_use", "step", "status"):
                         yield _sse({"type": "step", "text": f"opencode.{et}", "args": parsed})
                         continue
+                    if et.startswith("message.part") or et.startswith("session.") or et.startswith("provider."):
+                        yield _sse({"type": "step", "text": f"opencode.{et}", "args": parsed})
+                        safe_txt = _sanitize_opencode_text(txt)
+                        if safe_txt:
+                            low = safe_txt.lower()
+                            if low not in ("thinking", "working") and "esc to interrupt" not in low:
+                                emitted = True
+                                first_chunk_emitted = True
+                                if first_chunk_elapsed_ms is None:
+                                    first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                                    _devlog(f"[run:{run_tag}] first.token ms={first_chunk_elapsed_ms} via={et}")
+                                    yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
+                                yield _sse({"type": "chunk", "text": safe_txt})
+                        continue
                     if txt.strip():
-                        low = txt.strip().lower()
+                        safe_txt = _sanitize_opencode_text(txt)
+                        if not safe_txt:
+                            continue
+                        low = safe_txt.lower()
                         if low not in ("thinking", "working") and "esc to interrupt" not in low:
                             emitted = True
                             first_chunk_emitted = True
                             if first_chunk_elapsed_ms is None:
                                 first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                                _devlog(f"[run:{run_tag}] first.token ms={first_chunk_elapsed_ms} via=parsed_text")
                                 yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
-                            yield _sse({"type": "chunk", "text": txt})
+                            yield _sse({"type": "chunk", "text": safe_txt})
                     continue
 
                 low = clean.lower()
                 if low not in ("thinking", "working") and "esc to interrupt" not in low:
+                    safe_clean = _sanitize_opencode_text(clean)
+                    if not safe_clean:
+                        continue
                     emitted = True
                     first_chunk_emitted = True
                     if first_chunk_elapsed_ms is None:
                         first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                        _devlog(f"[run:{run_tag}] first.token ms={first_chunk_elapsed_ms} via=plain_line")
                         yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
-                    yield _sse({"type": "chunk", "text": clean})
+                    yield _sse({"type": "chunk", "text": safe_clean})
 
         tail = stdout_buf.strip()
         if tail:
@@ -1872,23 +2150,33 @@ async def _opencode_stream(
             except Exception:
                 parsed_tail = None
             if isinstance(parsed_tail, dict):
-                txt = str(parsed_tail.get("text") or parsed_tail.get("content") or "").strip()
+                txt = _sanitize_opencode_text(str(parsed_tail.get("text") or parsed_tail.get("content") or "").strip())
                 if txt:
                     emitted = True
                     first_chunk_emitted = True
                     if first_chunk_elapsed_ms is None:
                         first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                        _devlog(f"[run:{run_tag}] first.token ms={first_chunk_elapsed_ms} via=tail_json")
                         yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
                     yield _sse({"type": "chunk", "text": txt})
             else:
-                emitted = True
-                first_chunk_emitted = True
-                if first_chunk_elapsed_ms is None:
-                    first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
-                    yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
-                yield _sse({"type": "chunk", "text": tail})
+                safe_tail = _sanitize_opencode_text(tail)
+                if safe_tail:
+                    emitted = True
+                    first_chunk_emitted = True
+                    if first_chunk_elapsed_ms is None:
+                        first_chunk_elapsed_ms = int((time.time() - started_waiting_at) * 1000)
+                        _devlog(f"[run:{run_tag}] first.token ms={first_chunk_elapsed_ms} via=tail_plain")
+                        yield _sse({"type": "step", "text": "opencode.first_token", "args": {"elapsed_ms": first_chunk_elapsed_ms}})
+                    yield _sse({"type": "chunk", "text": safe_tail})
 
     finally:
+        if raw_log_fh is not None:
+            try:
+                raw_log_fh.write(f"[{datetime.now().isoformat(timespec='seconds')}] END rc={proc.returncode}\n")
+                raw_log_fh.close()
+            except Exception:
+                pass
         for task in pump_tasks:
             if not task.done():
                 task.cancel()
@@ -1904,13 +2192,24 @@ async def _opencode_stream(
 
     if not emitted:
         stderr_text = _strip_ansi("".join(stderr_seen)).strip()
-        err_msg = (
-            f"opencode error: {stderr_text[:500]}" if stderr_text
-            else "opencode no devolvió salida (empty completion)."
-        )
-        yield _sse({"type": "error", "text": err_msg})
+        if proc.returncode in (0, None) and first_stdout_event_seen:
+            _devlog(f"[run:{run_tag}] completion.empty_but_active fallback=Listo")
+            yield _sse({"type": "chunk", "text": "Listo."})
+            emitted = True
+        else:
+            err_msg = (
+                f"opencode error: {stderr_text[:500]}" if stderr_text
+                else "opencode no devolvió salida (empty completion)."
+            )
+            yield _sse({"type": "error", "text": err_msg})
 
     return_code = proc.returncode
+    elapsed_ms = int((time.time() - t0) * 1000)
+    _devlog(
+        f"[run:{run_tag}] stream.end rc={return_code} emitted={emitted} "
+        f"first_queue_ms={first_queue_event_elapsed_ms} first_stderr_ms={first_stderr_elapsed_ms} "
+        f"first_token_ms={first_chunk_elapsed_ms} total_ms={elapsed_ms}"
+    )
     if return_code not in (0, None):
         stderr_text = _strip_ansi("".join(stderr_seen)).strip()
         msg = f"opencode terminó con código {return_code}."
@@ -1938,13 +2237,15 @@ async def _startup_bootstrap():
     """Run at server startup: bootstrap runtime then optionally warm up opencode.
 
     1. Runs _bootstrap_locked_runtime() in a thread (forces config, downloads model)
-    2. If UNLZ_OPENCODE_WARMUP_ON_STARTUP=1, starts background warmup task
+    2. If UNLZ_OPENCODE_WARMUP_ON_STARTUP=1, runs warmup (background by default)
     """
     try:
         _BOOTSTRAP_STATE.update({"status": "running", "detail": "Inicializando runtime bloqueado..."})
         await asyncio.to_thread(_bootstrap_locked_runtime)
         auto_warmup = (os.getenv("UNLZ_OPENCODE_WARMUP_ON_STARTUP", "1") or "1").strip().lower() in ("1", "true", "yes", "on")
         if auto_warmup:
+            blocking = (os.getenv("UNLZ_OPENCODE_WARMUP_BLOCKING_STARTUP", "1") or "1").strip().lower() in ("1", "true", "yes", "on")
+
             async def _bg_warmup():
                 with _OPENCODE_WARMUP_LOCK:
                     _OPENCODE_WARMUP_STATE.update({
@@ -1956,7 +2257,11 @@ async def _startup_bootstrap():
                 result = await asyncio.to_thread(_run_opencode_warmup_once)
                 with _OPENCODE_WARMUP_LOCK:
                     _OPENCODE_WARMUP_STATE.update(result)
-            asyncio.create_task(_bg_warmup())
+
+            if blocking:
+                await _bg_warmup()
+            else:
+                asyncio.create_task(_bg_warmup())
     except Exception as exc:
         _BOOTSTRAP_STATE.update({"status": "error", "detail": f"Bootstrap error: {exc}"})
 
@@ -2033,6 +2338,11 @@ def _chat_streaming_response(req: ChatRequest) -> StreamingResponse:
         StreamingResponse with text/event-stream media type and no-cache headers.
     """
     run_id = str(uuid.uuid4())
+    req_t0 = time.time()
+    _devlog(
+        f"[run:{run_id}] chat.request_start mode={req.mode} tools_mode={req.tools_mode} "
+        f"internet={req.internet_enabled} history={len(req.history)} msg_chars={len(req.message or '')}"
+    )
     cancel_event = _register_run_cancel(run_id)
 
     async def _generate():
@@ -2095,6 +2405,7 @@ def _chat_streaming_response(req: ChatRequest) -> StreamingResponse:
                 tools_mode=req.tools_mode,
                 llamacpp_overrides=req.llamacpp_overrides,
                 cancel_event=cancel_event,
+                run_id=run_id,
             ):
                 _record(ev)
                 try:
@@ -2138,8 +2449,11 @@ def _chat_streaming_response(req: ChatRequest) -> StreamingResponse:
             trace["finished_at"] = datetime.now().isoformat(timespec="seconds")
             try:
                 _persist_trace(run_id, trace)
+                _devlog(f"[run:{run_id}] trace.persisted events={len(trace.get('events') or [])}")
             except Exception:
                 pass
+            total_ms = int((time.time() - req_t0) * 1000)
+            _devlog(f"[run:{run_id}] chat.request_end total_ms={total_ms}")
 
     return StreamingResponse(
         _generate(),
@@ -2293,22 +2607,35 @@ async def start_mcp_server():
     """
     if _http_reachable("http://127.0.0.1:8000/"):
         return {"status": "already_running"}
-    script = _runtime_root_dir() / "mcp_server.py"
-    if not script.exists():
-        raise HTTPException(status_code=404, detail="mcp_server.py no encontrado")
+    root = _runtime_root_dir()
+    script = root / "mcp_server.py"
+    sidecar = root / "binaries" / "mcp_server.exe"
+    if not script.exists() and not sidecar.exists():
+        raise HTTPException(status_code=404, detail="mcp_server.py/mcp_server.exe no encontrado")
     creationflags = 0
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
     try:
-        subprocess.Popen(
-            [sys.executable, str(script)],
-            cwd=str(_runtime_root_dir()),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=True,
-        )
+        if sidecar.exists():
+            subprocess.Popen(
+                [str(sidecar)],
+                cwd=str(root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"No se pudo iniciar MCP: {exc}") from exc
     await asyncio.sleep(0.7)
